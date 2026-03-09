@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FastDatasets Configuration Schema",
+  "description": "FastDatasets数据集生成任务配置参数",
+  "type": "object",
+  "required": ["input_files", "api_key", "base_url", "model_name"],
+  "properties": {
+    "input_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "输入文件路径列表",
+      "description": "支持PDF、DOCX、TXT、MD格式的文件路径数组"
+    },
+    "output_dir": {
+      "type": "string",
+      "default": "/workspace/user-data/dataset",
+      "title": "输出目录",
+      "description": "生成数据集的输出目录（固定值）",
+      "readOnly": true
+    },
+    "chunk_min_len": {
+      "type": "integer",
+      "minimum": 50,
+      "maximum": 10000,
+      "default": 200,
+      "title": "最小分块长度",
+      "description": "文本分块的最小字符数"
+    },
+    "chunk_max_len": {
+      "type": "integer",
+      "minimum": 500,
+      "maximum": 20000,
+      "default": 1000,
+      "title": "最大分块长度",
+      "description": "文本分块的最大字符数"
+    },
+    "questions_per_chunk": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 2,
+      "title": "每块问题数",
+      "description": "每个文本块生成的问题数量"
+    },
+    "output_formats": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["alpaca", "sharegpt"]
+      },
+      "minItems": 1,
+      "default": ["alpaca", "sharegpt"],
+      "title": "输出格式",
+      "description": "生成数据集的格式（可多选）"
+    },
+    "enable_cot": {
+      "type": "boolean",
+      "default": true,
+      "title": "启用思维链",
+      "description": "是否启用Chain-of-Thought模式"
+    },
+    "llm_concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 3,
+      "title": "LLM并发数",
+      "description": "LLM API并发请求数"
+    },
+    "file_concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 2,
+      "title": "文件并发数",
+      "description": "文件处理并发数"
+    },
+    "api_key": {
+      "type": "string",
+      "minLength": 1,
+      "title": "API密钥",
+      "description": "LLM API密钥"
+    },
+    "base_url": {
+      "type": "string",
+      "format": "uri",
+      "title": "API基础地址",
+      "description": "LLM API的基础URL",
+      "examples": ["https://api.openai.com/v1", "https://api.siliconflow.cn/v1"]
+    },
+    "model_name": {
+      "type": "string",
+      "minLength": 1,
+      "title": "模型名称",
+      "description": "使用的LLM模型名称",
+      "examples": ["gpt-4o-mini", "Qwen/Qwen2.5-7B-Instruct"]
+    }
+  }
+}
