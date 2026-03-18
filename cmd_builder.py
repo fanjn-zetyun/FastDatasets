@@ -8,7 +8,7 @@ import os
 import sys
 
 # 固定的输出目录
-OUTPUT_DIR = "/workspace/user-data/dataset"
+OUTPUT_DIR = "/workspace/user-data/datasets"
 
 def load_params():
     """
