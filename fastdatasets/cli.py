@@ -9,7 +9,10 @@ from app.core.document import DocumentProcessor
 from app.core.dataset import DatasetBuilder
 
 
-def run_generate(input_paths: List[str], output_dir: str, formats: List[str], file_format: str):
+def run_generate(input_paths: List[str], output_dir: str, formats: List[str], file_format: str,
+                 chunk_min_len: int = None, chunk_max_len: int = None,
+                 questions_per_chunk: int = None, llm_concurrency: int = None,
+                 file_concurrency: int = None, enable_cot: bool = False):
     cfg = Config()
 
     # 环境变量覆盖（便于 CLI 直接注入）
@@ -17,6 +20,18 @@ def run_generate(input_paths: List[str], output_dir: str, formats: List[str], fi
     base_url = os.getenv("LLM_API_BASE", cfg.BASE_URL)
     model = os.getenv("LLM_MODEL", cfg.MODEL_NAME)
     cfg.API_KEY, cfg.BASE_URL, cfg.MODEL_NAME = api_key, base_url, model
+
+    # CLI 参数覆盖配置
+    if chunk_min_len is not None:
+        cfg.CHUNK_MIN_LEN = chunk_min_len
+    if chunk_max_len is not None:
+        cfg.CHUNK_MAX_LEN = chunk_max_len
+    if questions_per_chunk is not None:
+        cfg.DEFAULT_SAMPLE_SIZE = questions_per_chunk
+    if llm_concurrency is not None:
+        cfg.MAX_LLM_CONCURRENCY = llm_concurrency
+    if enable_cot:
+        cfg.ENABLE_COT = True
 
     processor = DocumentProcessor()
     builder = DatasetBuilder()
@@ -49,12 +64,21 @@ def main():
     gen.add_argument("-o", "--output", default="output", help="Output directory")
     gen.add_argument("-f", "--formats", default="alpaca", help="Export formats, comma-separated (alpaca,sharegpt)")
     gen.add_argument("--file-format", default="json", choices=["json", "jsonl"], help="Output file format")
+    gen.add_argument("--chunk-min-len", type=int, default=None, help="Minimum chunk length")
+    gen.add_argument("--chunk-max-len", type=int, default=None, help="Maximum chunk length")
+    gen.add_argument("--questions-per-chunk", type=int, default=None, help="Number of questions per chunk")
+    gen.add_argument("--llm-concurrency", type=int, default=5, help="LLM concurrency limit")
+    gen.add_argument("--file-concurrency", type=int, default=3, help="File processing concurrency")
+    gen.add_argument("--enable-cot", action="store_true", help="Enable chain-of-thought")
 
     args = parser.parse_args()
 
     if args.command == "generate":
         formats = [s.strip() for s in str(args.formats).split(",") if s.strip()]
-        run_generate(args.inputs, args.output, formats=formats, file_format=args.file_format)
+        run_generate(args.inputs, args.output, formats=formats, file_format=args.file_format,
+                     chunk_min_len=args.chunk_min_len, chunk_max_len=args.chunk_max_len,
+                     questions_per_chunk=args.questions_per_chunk, llm_concurrency=args.llm_concurrency,
+                     file_concurrency=args.file_concurrency, enable_cot=args.enable_cot)
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ class WebConfig:
         self.DEFAULT_CHUNK_MIN_LEN = 200
         self.DEFAULT_CHUNK_MAX_LEN = 1000
         self.DEFAULT_OUTPUT_FORMATS = ["alpaca", "sharegpt"]
-        self.DEFAULT_ENABLE_COT = True
+        self.DEFAULT_ENABLE_COT = False
         self.DEFAULT_LLM_CONCURRENCY = 3
         self.DEFAULT_FILE_CONCURRENCY = 2
         

@@ -102,9 +102,8 @@ class DatasetBuilder:
                 # 定义要执行的任务
                 tasks = [self._generate_answer(question, context)]
                 
-                # 如果启用了思维链，添加到任务中
-                if self.enable_cot:
-                    tasks.append(self._generate_cot(question))
+                # 注意: 思维链现在由 _generate_answer 根据 enable_cot 自动处理
+                # 不再需要单独调用 _generate_cot
                 
                 # 如果启用了标签生成，添加到任务中
                 if self.enable_label:
@@ -139,8 +138,8 @@ class DatasetBuilder:
                             # 直接处理API返回的JSON
                             print("处理API原始返回")
                             message = results[0]['choices'][0]['message']
-                            data_point["answer"] = message.get('content', '').strip()
-                            if 'reasoning_content' in message:
+                            data_point["answer"] = (message.get('content') or '').strip()
+                            if 'reasoning_content' in message and message['reasoning_content']:
                                 print(f"找到推理内容: {message['reasoning_content'][:50]}...")
                                 data_point["reasoning_content"] = message['reasoning_content'].strip()
                         elif 'content' in results[0]:
@@ -161,13 +160,6 @@ class DatasetBuilder:
                 
                 # 处理其他任务结果
                 task_index = 1
-                if self.enable_cot:
-                    if isinstance(results[task_index], Exception):
-                        logger.error(f"生成思维链失败: {str(results[task_index])}")
-                        data_point["cot"] = f"处理过程中发生错误: {str(results[task_index])}"
-                    else:
-                        data_point["cot"] = results[task_index]
-                    task_index += 1
                 
                 if self.enable_label:
                     if isinstance(results[task_index], Exception):
@@ -185,8 +177,9 @@ class DatasetBuilder:
                     if "answer" in data_point and not isinstance(data_point["answer"], Exception):
                         optimize_tasks.append(self._optimize_answer(data_point["answer"]))
                     
-                    if self.enable_cot and "cot" in data_point and not isinstance(data_point["cot"], Exception):
-                        optimize_tasks.append(self._optimize_cot(data_point["cot"]))
+                    # 优化 reasoning_content (如果启用了 CoT 且存在)
+                    if self.enable_cot and "reasoning_content" in data_point and not isinstance(data_point.get("reasoning_content"), Exception):
+                        optimize_tasks.append(self._optimize_cot(data_point["reasoning_content"]))
                     
                     if optimize_tasks:
                         optimize_results = await asyncio.gather(*optimize_tasks, return_exceptions=True)
@@ -198,9 +191,9 @@ class DatasetBuilder:
                                 data_point["answer"] = optimize_results[result_index]
                             result_index += 1
                         
-                        if self.enable_cot and "cot" in data_point and not isinstance(data_point["cot"], Exception):
+                        if self.enable_cot and "reasoning_content" in data_point and not isinstance(data_point.get("reasoning_content"), Exception):
                             if not isinstance(optimize_results[result_index], Exception):
-                                data_point["cot"] = optimize_results[result_index]
+                                data_point["reasoning_content"] = optimize_results[result_index]
                 
                 return data_point
             except Exception as e:
@@ -335,24 +328,23 @@ class DatasetBuilder:
             print(f"\n=== 处理数据点 ===")
             print(f"问题: {item['question'][:50]}...")
             print(f"回答: {item['answer'][:50]}...")
-            print(f"reasoning_content存在: {'reasoning_content' in item}")
-            if 'reasoning_content' in item:
-                print(f"reasoning_content: {item['reasoning_content'][:50]}...")
-            print(f"config.ENABLE_REASONING_CONTENT: {config.ENABLE_REASONING_CONTENT}")
+            print(f"enable_cot: {self.enable_cot}")
             
             # 构建输出
             output = ""
-            if config.ENABLE_REASONING_CONTENT and 'reasoning_content' in item:
+            if self.enable_cot and 'reasoning_content' in item and item.get('reasoning_content'):
                 print("添加推理内容到输出")
                 output = f"<think>\n{item.get('reasoning_content', '')}\n</think>\n\n{self._clean_markdown_json(item['answer'])}"
             else:
-                output = self._clean_markdown_json(item["answer"])
+                # enable_cot=False 或没有 reasoning_content
+                # 根据 enable_cot 决定是否移除思考标签
+                output = self._clean_markdown_json(item["answer"], remove_think_tags=not self.enable_cot)
             
             result.append({
                 "instruction": self._clean_markdown_json(item["question"]),
                 "input": "",
-                "output": self._clean_optimized_output(output),
-                "system": self.system_prompt or ""
+                "output": self._clean_optimized_output(output)
+                # "system": self.system_prompt or ""
             })
             
         return result
@@ -362,10 +354,21 @@ class DatasetBuilder:
         result = []
         for item in data:
             messages = []
-            if self.system_prompt:
-                messages.append({"role": "system", "content": self.system_prompt})
+            # if self.system_prompt:
+            #     messages.append({"role": "system", "content": self.system_prompt})
             messages.append({"role": "user", "content": self._clean_markdown_json(item["question"])})
-            messages.append({"role": "assistant", "content": self._clean_optimized_output(self._clean_markdown_json(item["answer"]))})
+            
+            # 根据 enable_cot 构建回答内容
+            if self.enable_cot and 'reasoning_content' in item and item.get('reasoning_content'):
+                reasoning = item.get('reasoning_content', '')
+                answer = self._clean_markdown_json(item['answer'])
+                assistant_content = f"<think>\n{reasoning}\n</think>\n\n{answer}"
+            else:
+                # enable_cot=False 或没有 reasoning_content
+                # 根据 enable_cot 决定是否移除思考标签
+                assistant_content = self._clean_optimized_output(self._clean_markdown_json(item["answer"], remove_think_tags=not self.enable_cot))
+            
+            messages.append({"role": "assistant", "content": assistant_content})
             result.append({"messages": messages})
         return result
     
@@ -379,8 +382,32 @@ class DatasetBuilder:
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def _clean_markdown_json(self, text: str) -> str:
-        """清理 Markdown 中的 JSON 格式"""
+    def _clean_markdown_json(self, text: str, remove_think_tags: bool = True) -> str:
+        """清理 Markdown 中的 JSON 格式
+        
+        Args:
+            text: 要清理的文本
+            remove_think_tags: 是否移除思考标签（默认True）
+        """
+        if remove_think_tags:
+            # 去除思考标签 - 多种格式
+            # DeepSeek 风格: <|im_start|>think<|im_end|>...<|im_start|>/think<|im_end|>
+            text = re.sub(r"<\|im_start\|>think<\|im_end\|>.*?<\|im_start\|>/think<\|im_end\|>", "", text, flags=re.DOTALL)
+            # Markdown 代码块风格: ```think...```
+            text = re.sub(r"```think.*?```", "", text, flags=re.DOTALL)
+            # 简单标签风格: <think...>
+            text = re.sub(r"<think[^>]*>.*?</think\s*>", "", text, flags=re.DOTALL | re.IGNORECASE)
+            # 可能的残留标签
+            text = re.sub(r"<\|im_start\|>think<\|im_end\|>", "", text)
+            text = re.sub(r"<\|im_start\|>/think<\|im_end\|>", "", text)
+            text = re.sub(r"<think[^>]*/>", "", text)
+            text = re.sub(r"</think\s*>", "", text)
+            
+            # 处理 ohl 格式（可能是特殊编码的思考内容）
+            # 使用贪婪匹配，直到找到标准格式开头
+            text = re.sub(r"^ohl\s*\n[\s\S]*?\n{2,}(?=\*\*问题|\*\*答案|\*\*Question|\*\*Answer|\[|\{)", "", text, flags=re.DOTALL)
+            text = re.sub(r"^ohl\s*\n", "", text)
+        
         # 去除开头和结尾的```、```json、首尾空行
         text = re.sub(r"^\s*```json\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"^\s*```\s*", "", text)
@@ -391,16 +418,22 @@ class DatasetBuilder:
         try:
             obj = json.loads(text)
             if isinstance(obj, list):
-                # 只保留每个问题字符串，合并为多行
                 return "\n".join(str(q).strip() for q in obj)
             if isinstance(obj, str):
                 return obj.strip()
         except Exception:
             pass
         return text
-    
+
+
+
+
     def _clean_optimized_output(self, text: str) -> str:
         """清理优化后的输出"""
+        # 处理 ohl 开头的格式（可能是特殊编码的思考内容）
+        # 匹配从 ohl 开始到实际内容之间的所有内容（使用贪婪匹配直到找到标准格式）
+        text = re.sub(r"^ohl\s*\n[\s\S]*?\n{2,}(?=\*\*问题|\*\*答案|\*\*Question|\*\*Answer)", "", text, flags=re.DOTALL)
+        text = re.sub(r"^ohl\s*\n", "", text)
         # 去除常见冗余前缀
         text = re.sub(r"^#+\s*优化后的答案内容[:：]?\s*", "", text)
         text = re.sub(r"^优化后的答案内容[:：]?\s*", "", text)
@@ -411,6 +444,8 @@ class DatasetBuilder:
         text = re.sub(r"^#+\s*Optimized COT content[:：]?\s*", "", text)
         text = re.sub(r"^Optimized COT content[:：]?\s*", "", text)
         return text.strip()
+
+
     
     async def _generate_questions(self, context: str, number: int = 5) -> List[str]:
         """生成问题"""
@@ -618,17 +653,42 @@ Based on the text provided by the user(length: {len(context)} characters), gener
         # 处理响应
         if isinstance(response, dict) and 'choices' in response:
             message = response['choices'][0]['message']
-            content = message.get('content', '').strip()
-            reasoning_content = message.get('reasoning_content', '').strip()
-            
+            content = (message.get('content') or '').strip()
+            reasoning_content = (message.get('reasoning_content') or '').strip()
+
+            # 根据 enable_cot 决定是否清理思考标签
+            # enable_cot=True: 保留思考标签（思维链在答案中）
+            # enable_cot=False: 移除思考标签
+            if not self.enable_cot:
+                content = self._remove_think_tags(content)
+                reasoning_content = ""  # 不保留推理内容
+
             # 如果启用了推理内容且存在推理内容，则返回包含推理内容的字典
-            if config.ENABLE_REASONING_CONTENT and reasoning_content:
+            if self.enable_cot and reasoning_content:
                 return {
                     'content': content,
                     'reasoning_content': reasoning_content
                 }
             return content
         return str(response)
+
+    def _remove_think_tags(self, text: str) -> str:
+        """移除思考标签（如 <|im_start|>think<|im_end|>... 或其他格式）"""
+        # 处理 DeepSeek 风格的思考标签
+        text = re.sub(r"<\|im_start\|>think<\|im_end\|>.*?<\|im_start\|>/think<\|im_end\|>", "", text, flags=re.DOTALL)
+        # 处理 ohl 开头的格式（可能是特殊编码的思考内容）
+        text = re.sub(r"^ohl\s+\n.*?\n{2,}(?=\*\*问题|\*\*答案|问题\d)", "", text, flags=re.DOTALL)
+        # 处理其他常见思考标签格式
+        text = re.sub(r"<think[^>]*>.*?</think\s*>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"```think.*?```", "", text, flags=re.DOTALL)
+        # 清理可能残留的开始或结束标签
+        text = re.sub(r"<\|im_start\|>think<\|im_end\|>", "", text)
+        text = re.sub(r"<\|im_start\|>/think<\|im_end\|>", "", text)
+        text = re.sub(r"<think[^>]*/>", "", text)
+        text = re.sub(r"</think\s*>", "", text)
+        return text.strip()
+
+
 
     async def _generate_cot(self, question: str) -> str:
         """生成思维链"""

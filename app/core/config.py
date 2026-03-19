@@ -71,7 +71,7 @@ class Config:
     OUTPUT_DIR = os.getenv("STORAGE_PATH", "data/output/")
     # Language
     LANGUAGE = os.getenv("LANGUAGE", "中文")
-    SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "你是一个有用的助手。")
+    SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "你是一个有用的助手，可以帮我根据文档内容生产大模型微调需要的alpaca或者shareGPT格式的数据集。")
     # Output formats
     OUTPUT_FORMATS = os.getenv("OUTPUT_FORMATS", "alpaca,sharegpt").split(",")
     OUTPUT_FILE_FORMAT = os.getenv("DATASET_FORMAT", "json")
