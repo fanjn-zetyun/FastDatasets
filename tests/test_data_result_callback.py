@@ -23,6 +23,9 @@ def test_export_dataset_callbacks_after_success(monkeypatch, tmp_path):
         )
 
         class FakeResponse:
+            status_code = 200
+            text = "ok"
+
             def raise_for_status(self):
                 return None
 
@@ -30,6 +33,8 @@ def test_export_dataset_callbacks_after_success(monkeypatch, tmp_path):
 
     monkeypatch.setenv("CALLBACK_URL", "http://callback.test/front/callback/dataResultPath")
     monkeypatch.setenv("TASK_ID", "abc123")
+    log_file = tmp_path / "fastdatasets.log"
+    monkeypatch.setenv("FASTDATASETS_LOG_FILE", str(log_file))
     monkeypatch.setattr("app.core.dataset.httpx.post", fake_post)
 
     export_base = tmp_path / "job001"
@@ -60,3 +65,8 @@ def test_export_dataset_callbacks_after_success(monkeypatch, tmp_path):
         with open(path, "r", encoding="utf-8") as file_obj:
             lines = [json.loads(line) for line in file_obj if line.strip()]
         assert lines
+
+    log_text = log_file.read_text(encoding="utf-8")
+    assert "开始数据结果路径回调" in log_text
+    assert "数据结果路径回调成功" in log_text
+    assert "response=ok" in log_text

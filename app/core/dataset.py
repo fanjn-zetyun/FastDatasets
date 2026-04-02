@@ -1,6 +1,7 @@
 import os
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 import asyncio
@@ -389,25 +390,53 @@ class DatasetBuilder:
 
         if not callback_url:
             logger.info("未配置 CALLBACK_URL，跳过数据结果路径回调")
+            self._append_callback_log("未配置 CALLBACK_URL，跳过数据结果路径回调")
             return
 
         if not task_id:
             logger.warning("未配置 TASK_ID，跳过数据结果路径回调")
+            self._append_callback_log("未配置 TASK_ID，跳过数据结果路径回调")
             return
 
         successful_paths = [path for path in exported_paths if path and os.path.exists(path)]
         if not successful_paths:
             logger.warning("没有成功生成的数据集文件，跳过数据结果路径回调")
+            self._append_callback_log("没有成功生成的数据集文件，跳过数据结果路径回调")
             return
 
         payload = [{"id": task_id, "resultPath": path} for path in successful_paths]
+        self._append_callback_log(
+            f"开始数据结果路径回调: url={callback_url}, payload={json.dumps(payload, ensure_ascii=False)}"
+        )
 
         try:
             response = httpx.post(callback_url, json=payload, timeout=30.0)
             response.raise_for_status()
             logger.info(f"数据结果路径回调成功: {callback_url}")
+            self._append_callback_log(
+                f"数据结果路径回调成功: url={callback_url}, status_code={response.status_code}, response={response.text}"
+            )
         except Exception as exc:
             logger.error(f"数据结果路径回调失败: {callback_url}, error: {exc}")
+            self._append_callback_log(f"数据结果路径回调失败: url={callback_url}, error={exc}")
+
+    def _append_callback_log(self, message: str) -> None:
+        """将回调日志追加到 entrypoint.sh 使用的同一日志文件。"""
+        log_file = (os.getenv("FASTDATASETS_LOG_FILE") or "").strip()
+        if not log_file:
+            return
+
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{timestamp}] {message}\n"
+        try:
+            with open(log_file, "a", encoding="utf-8") as file_obj:
+                file_obj.write(line)
+        except Exception as exc:
+            logger.error(f"写入回调日志文件失败: {log_file}, error: {exc}")
     
     def _export_alpaca(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """导出为 Alpaca 格式"""
