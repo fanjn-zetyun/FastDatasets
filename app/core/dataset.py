@@ -360,7 +360,8 @@ class DatasetBuilder:
             output_dir = os.path.dirname(output_path) or "."
             # 确保输出目录存在
             os.makedirs(output_dir, exist_ok=True)
-        
+
+        exported_paths: List[str] = []
         for fmt in formats:
             if fmt == "alpaca":
                 export_data = self._export_alpaca(dataset)
@@ -377,6 +378,36 @@ class DatasetBuilder:
                 
             self._save_output(export_data, out_path, file_format)
             logger.info(f"已导出 {fmt} 格式: {out_path}")
+            exported_paths.append(out_path)
+
+        self._notify_export_results(exported_paths)
+
+    def _notify_export_results(self, exported_paths: List[str]) -> None:
+        """在数据集文件成功生成后回调结果路径。"""
+        callback_url = (os.getenv("CALLBACK_URL") or "").strip()
+        task_id = (os.getenv("TASK_ID") or "").strip()
+
+        if not callback_url:
+            logger.info("未配置 CALLBACK_URL，跳过数据结果路径回调")
+            return
+
+        if not task_id:
+            logger.warning("未配置 TASK_ID，跳过数据结果路径回调")
+            return
+
+        successful_paths = [path for path in exported_paths if path and os.path.exists(path)]
+        if not successful_paths:
+            logger.warning("没有成功生成的数据集文件，跳过数据结果路径回调")
+            return
+
+        payload = [{"id": task_id, "resultPath": path} for path in successful_paths]
+
+        try:
+            response = httpx.post(callback_url, json=payload, timeout=30.0)
+            response.raise_for_status()
+            logger.info(f"数据结果路径回调成功: {callback_url}")
+        except Exception as exc:
+            logger.error(f"数据结果路径回调失败: {callback_url}, error: {exc}")
     
     def _export_alpaca(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """导出为 Alpaca 格式"""
