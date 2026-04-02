@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # 创建日志目录
 LOG_DIR="/workspace/tmp/fastdatasets_container"
@@ -33,9 +33,17 @@ log "Building FastDatasets command..."
 python3 /app/cmd_builder.py
 
 log "Starting FastDatasets..."
+set +e
 bash /tmp/fastdatasets_cmd.sh 2>&1 | while IFS= read -r line; do
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $line" | tee -a "$LOG_FILE"
 done
+cmd_status=${PIPESTATUS[0]}
+set -e
+
+if [ "$cmd_status" -ne 0 ]; then
+    log "ERROR: FastDatasets failed with exit code $cmd_status"
+    exit "$cmd_status"
+fi
 
 log "FastDatasets completed successfully!"
 log "=========================================="
