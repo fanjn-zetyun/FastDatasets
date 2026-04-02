@@ -7,6 +7,9 @@ import time
 import logging
 import traceback
 import os
+import json
+import re
+from urllib.parse import urlparse
 from app.core.config import config
 from app.core.logger import logger
 
@@ -20,6 +23,13 @@ class AsyncLLM:
         self.system_prompt = system_prompt or getattr(config, 'SYSTEM_PROMPT', None)
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
+
+    def _is_local_base_url(self) -> bool:
+        if not self.base_url:
+            return False
+        parsed = urlparse(self.base_url)
+        hostname = (parsed.hostname or "").lower()
+        return hostname in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
     
     # 保持原有的简单接口，但内部使用高级实现
     async def call_llm(self, prompt, max_tokens=2048*2):
@@ -128,7 +138,7 @@ class AsyncLLM:
                             
                             # 解析响应
                             response_json = resp.json()
-                            print(f"完整响应: {response_json}")
+                            # print(f"完整响应: {response_json}")
                             
                             # 处理响应格式，返回完整的响应JSON，方便处理推理内容
                             logger.debug(f"[{request_id}] 请求成功，耗时 {elapsed:.2f}秒")
@@ -178,6 +188,12 @@ class AsyncLLM:
                 except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
                     elapsed = time.time() - start_time if 'start_time' in locals() else 0
                     logger.warning(f"[{request_id}] 连接/读取错误 ({type(e).__name__}): {str(e)} ({elapsed:.1f}秒)")
+
+                    if self._is_local_base_url():
+                        logger.error(f"[{request_id}] 本地 LLM 服务不可达，直接使用离线回退响应")
+                        if return_exceptions:
+                            return e
+                        return self._fallback_response(prompt)
                     
                     if attempt < retries - 1:
                         wait_time = backoff_factor * (2 ** attempt)
@@ -213,12 +229,31 @@ class AsyncLLM:
     def _fallback_response(self, prompt: str) -> str:
         """当 LLM API 调用失败时的后备响应"""
         logger.warning("使用模拟回复代替 LLM 响应")
-        if "question" in prompt.lower():
-            return '["这是一个示例问题？", "这是另一个示例问题？"]'
-        elif "answer" in prompt.lower():
-            return "这是一个示例回答，由于无法连接到 LLM API 而生成的模拟内容。"
-        else:
+        prompt_lower = prompt.lower()
+
+        if "优化建议" in prompt or "optimization suggestions" in prompt_lower:
+            for marker in ("## 原始答案：", "## Original Answer:", "## 原始思维链：", "## Original COT:"):
+                if marker in prompt:
+                    original = prompt.split(marker, 1)[1]
+                    original = re.split(r"\n\s*##\s+", original, maxsplit=1)[0]
+                    return original.strip() or "模拟 LLM 响应"
             return "模拟 LLM 响应"
+
+        if "生成不少于" in prompt or "generate no less than" in prompt_lower:
+            match = re.search(r"生成不少于\s*(\d+)\s*个", prompt)
+            if not match:
+                match = re.search(r"no less than\s*(\d+)", prompt_lower)
+            count = int(match.group(1)) if match else 1
+            questions = [f"问题{i + 1}：请概括这段内容的关键信息？" for i in range(max(1, count))]
+            return json.dumps(questions, ensure_ascii=False)
+
+        if "为该问题生成2-3个相关领域标签" in prompt or "generate 2-3 relevant domain labels" in prompt_lower:
+            return '["其他"]'
+
+        if "## 问题" in prompt or "\n## question" in prompt_lower:
+            return "这是基于输入内容生成的离线示例答案。当前 LLM 服务不可达，因此使用本地回退内容完成数据集导出。"
+
+        return "模拟 LLM 响应"
 
 # For sync usage or testing
 class DummyLLM:

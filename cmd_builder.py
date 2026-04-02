@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from typing import Any, List
 
 # 固定的输出目录
 OUTPUT_DIR = "/workspace/user-data/datasets"
@@ -48,6 +49,45 @@ def load_params():
 
     raise Exception("No parameters provided. Set FASTDATASETS_PARAMS env var, mount /config/params.json, or pipe JSON to stdin.")
 
+def normalize_input_files(params: dict) -> List[str]:
+    """将多种输入参数统一归一化为文件路径列表。"""
+    candidates: List[Any] = []
+
+    upload_method = params.get("upload_method")
+    if upload_method and params.get(upload_method):
+        candidates.append(params.get(upload_method))
+
+    for key in ("file_path_input", "input_files", "local_file_upload"):
+        if params.get(key) is not None:
+            candidates.append(params.get(key))
+
+    normalized: List[str] = []
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            value = candidate.strip()
+            if value:
+                normalized.append(value)
+        elif isinstance(candidate, (list, tuple)):
+            for item in candidate:
+                if isinstance(item, str):
+                    value = item.strip()
+                    if value:
+                        normalized.append(value)
+
+    # 去重并保持顺序
+    unique_inputs: List[str] = []
+    seen = set()
+    for path in normalized:
+        if path not in seen:
+            unique_inputs.append(path)
+            seen.add(path)
+
+    existing_inputs = [path for path in unique_inputs if os.path.exists(path)]
+    if existing_inputs:
+        return existing_inputs
+
+    return unique_inputs
+
 def build_command(params):
     """构建FastDatasets CLI命令"""
 
@@ -56,9 +96,9 @@ def build_command(params):
     os.environ["LLM_API_BASE"] = params.get("base_url", "")
     os.environ["LLM_MODEL"] = params.get("model_name", "")
 
-    # 提取参数
-    input_files = params.get("input_files", [])
-    output_dir = params.get("output_dir", OUTPUT_DIR)
+    # 提取输入文件 - 兼容字符串/数组以及 upload_method 指定的字段
+    input_files = normalize_input_files(params)
+    output_path = params.get("export_path", '')
     output_formats = params.get("output_formats", ["alpaca", "sharegpt"])
     chunk_min_len = params.get("chunk_min_len", 200)
     chunk_max_len = params.get("chunk_max_len", 1000)
@@ -66,12 +106,22 @@ def build_command(params):
     enable_cot = params.get("enable_cot", False)
     llm_concurrency = params.get("llm_concurrency", 3)
     file_concurrency = params.get("file_concurrency", 2)
+    name = params.get("name", None)
+    if not name:
+        name = params.get("exportFileName", None)
+
+    if not input_files:
+        raise ValueError("No valid input files provided in FASTDATASETS_PARAMS")
 
     # 构建命令参数列表
+    # 注意：FastDatasets工具会自动处理同名数据集文件，会在文件名后添加_1, _2等后缀
+    # 例如：export_path=/workspace/user-data/datasets/fd-2026-03-31
+    # 生成的文件：/workspace/user-data/datasets/fd-2026-03-31-alpaca.json
+    # 如果文件已存在，会自动重命名为：/workspace/user-data/datasets/fd-2026-03-31-alpaca_1.json
     cmd_parts = [
         "fastdatasets", "generate",
         *input_files,
-        "-o", output_dir,
+        "-o", output_path,
         "-f", ",".join(output_formats),
         "--chunk-min-len", str(chunk_min_len),
         "--chunk-max-len", str(chunk_max_len),
@@ -82,6 +132,9 @@ def build_command(params):
 
     if enable_cot:
         cmd_parts.append("--enable-cot")
+    
+    if name:
+        cmd_parts.extend(["-n", name])
 
     return cmd_parts
 
