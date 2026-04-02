@@ -64,7 +64,7 @@ class Config:
     CHUNK_MAX_LEN = int(os.getenv("DOCUMENT_MAX_CHUNK_SIZE", "2000").split('#')[0].strip())
     # LLM API config
     API_KEY = os.getenv("LLM_API_KEY", "your-api-key")
-    BASE_URL = os.getenv("LLM_API_BASE", "http://localhost:8000/v1")
+    BASE_URL = os.getenv("LLM_API_BASE", "")
     MODEL_NAME = os.getenv("LLM_MODEL", "your-model-name")
     # Input/output
     INPUT_PATH = os.getenv("STORAGE_PATH", "data/input/")

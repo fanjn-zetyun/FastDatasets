@@ -14,6 +14,11 @@ from app.core.config import config
 from app.core.logger import logger
 
 class AsyncLLM:
+    _PLACEHOLDER_VALUES = {
+        "your-api-key",
+        "your-model-name",
+    }
+
     def __init__(self, model_name=None, base_url=None, api_key=None, language=None, max_concurrency=None, system_prompt=None):
         self.model_name = model_name or config.MODEL_NAME
         self.base_url = base_url or config.BASE_URL
@@ -24,10 +29,56 @@ class AsyncLLM:
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
 
-    def _is_local_base_url(self) -> bool:
-        if not self.base_url:
+    def _clean_setting(self, value):
+        if value is None:
+            return None
+        value = str(value).strip()
+        if not value or value in self._PLACEHOLDER_VALUES:
+            return None
+        return value
+
+    def _is_default_base_url(self, value) -> bool:
+        if value is None:
             return False
-        parsed = urlparse(self.base_url)
+        return str(value).strip() == str(config.BASE_URL).strip()
+
+    def _load_fastdatasets_params(self):
+        raw = os.getenv("FASTDATASETS_PARAMS")
+        if not raw:
+            return {}
+        try:
+            params = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("FASTDATASETS_PARAMS 不是合法 JSON，忽略其中的 LLM 配置")
+            return {}
+        return params if isinstance(params, dict) else {}
+
+    def _resolve_runtime_llm_settings(self):
+        params = self._load_fastdatasets_params()
+        fastdatasets_api_key = self._clean_setting(params.get("api_key"))
+        fastdatasets_base_url = self._clean_setting(params.get("base_url"))
+        fastdatasets_model_name = self._clean_setting(params.get("model_name"))
+
+        env_api_key = self._clean_setting(os.getenv("LLM_API_KEY"))
+        env_base_url = self._clean_setting(os.getenv("LLM_API_BASE"))
+        env_model_name = self._clean_setting(os.getenv("LLM_MODEL"))
+
+        instance_api_key = self._clean_setting(self.api_key)
+        instance_model_name = self._clean_setting(self.model_name)
+        instance_base_url = self._clean_setting(self.base_url)
+        if not fastdatasets_base_url and not env_base_url and self._is_default_base_url(self.base_url):
+            instance_base_url = None
+
+        api_key = fastdatasets_api_key or env_api_key or instance_api_key
+        base_url = fastdatasets_base_url or env_base_url or instance_base_url
+        model_name = fastdatasets_model_name or env_model_name or instance_model_name
+        return api_key, base_url, model_name
+
+    def _is_local_base_url(self, base_url=None) -> bool:
+        base_url = self._clean_setting(base_url if base_url is not None else self.base_url)
+        if not base_url:
+            return False
+        parsed = urlparse(base_url)
         hostname = (parsed.hostname or "").lower()
         return hostname in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
     
@@ -53,9 +104,7 @@ class AsyncLLM:
         # 异步信号量控制
         async with self.semaphore:
             # 重新从环境变量获取配置，确保使用最新设置
-            api_key = os.getenv("LLM_API_KEY") or self.api_key
-            base_url = os.getenv("LLM_API_BASE") or self.base_url
-            model_name = os.getenv("LLM_MODEL") or self.model_name
+            api_key, base_url, model_name = self._resolve_runtime_llm_settings()
             
             # 更新当前实例的设置
             self.api_key = api_key
@@ -66,6 +115,7 @@ class AsyncLLM:
             # 确保 API URL 格式正确
             if self.base_url and not self.base_url.startswith(('http://', 'https://')):
                 self.base_url = f"https://{self.base_url}"
+                base_url = self.base_url
                 
             # 检查必要参数
             if not self.api_key or not self.base_url or not self.model_name:
@@ -189,8 +239,8 @@ class AsyncLLM:
                     elapsed = time.time() - start_time if 'start_time' in locals() else 0
                     logger.warning(f"[{request_id}] 连接/读取错误 ({type(e).__name__}): {str(e)} ({elapsed:.1f}秒)")
 
-                    if self._is_local_base_url():
-                        logger.error(f"[{request_id}] 本地 LLM 服务不可达，直接使用离线回退响应")
+                    if self._is_local_base_url(base_url):
+                        logger.error(f"[{request_id}] 本地 LLM 服务不可达 ({base_url})，直接使用离线回退响应")
                         if return_exceptions:
                             return e
                         return self._fallback_response(prompt)
