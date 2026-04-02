@@ -13,6 +13,9 @@ from urllib.parse import urlparse
 from app.core.config import config
 from app.core.logger import logger
 
+class LLMRequestError(RuntimeError):
+    """Raised when an LLM request fails and the task should stop immediately."""
+
 class AsyncLLM:
     _PLACEHOLDER_VALUES = {
         "your-api-key",
@@ -41,6 +44,17 @@ class AsyncLLM:
         if value is None:
             return False
         return str(value).strip() == str(config.BASE_URL).strip()
+
+    def _extract_error_code(self, response) -> int | None:
+        try:
+            payload = response.json()
+        except Exception:
+            return None
+        code = payload.get("code") if isinstance(payload, dict) else None
+        try:
+            return int(code) if code is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def _load_fastdatasets_params(self):
         raw = os.getenv("FASTDATASETS_PARAMS")
@@ -88,15 +102,10 @@ class AsyncLLM:
         response = await self.call_llm_advanced(prompt=prompt, max_tokens=max_tokens)
         
         # 从响应中提取内容，保持向后兼容性
-        try:
-            if isinstance(response, dict) and 'choices' in response:
-                content = response['choices'][0]['message']['content'].strip()
-                return content
-            # 处理可能的错误或其他响应格式
-            return str(response)
-        except Exception as e:
-            logger.error(f"从响应中提取内容失败: {str(e)}")
-            return str(response) if response else "无法获取响应内容"
+        if isinstance(response, dict) and 'choices' in response:
+            content = response['choices'][0]['message']['content'].strip()
+            return content
+        return str(response)
     
     async def call_llm_advanced(self, prompt, max_tokens=2048*2, retries=8, backoff_factor=1.8, 
                                  dynamic_timeout=True, return_exceptions=False):
@@ -119,10 +128,11 @@ class AsyncLLM:
                 
             # 检查必要参数
             if not self.api_key or not self.base_url or not self.model_name:
-                logger.error("缺少必要的 LLM 配置参数")
+                error = LLMRequestError("缺少必要的LLM配置参数")
+                logger.error(str(error))
                 if return_exceptions:
-                    return RuntimeError("缺少必要的LLM配置参数")
-                return self._fallback_response(prompt)
+                    return error
+                raise error
             
             # 动态超时设置 - 根据prompt长度调整
             if dynamic_timeout:
@@ -135,6 +145,7 @@ class AsyncLLM:
             
             # 生成一个请求ID用于日志追踪
             request_id = f"req-{random.randint(1000, 9999)}"
+            last_error = None
             
             for attempt in range(retries):
                 try:
@@ -199,15 +210,17 @@ class AsyncLLM:
                         except httpx.HTTPStatusError as e:
                             elapsed = time.time() - start_time
                             status_code = e.response.status_code
+                            error_code = self._extract_error_code(e.response)
                             error_text = e.response.text[:200] + "..." if len(e.response.text) > 200 else e.response.text
                             
                             logger.error(f"[{request_id}] HTTP 错误 ({elapsed:.2f}秒): {status_code} - {error_text}")
                             
                             if status_code == 401:
-                                logger.error(f"[{request_id}] API 密钥错误或未授权")
+                                error = LLMRequestError(f"API 密钥错误或未授权: {error_text}")
+                                logger.error(f"[{request_id}] {error}")
                                 if return_exceptions:
-                                    return httpx.HTTPStatusError(f"认证错误: {error_text}", request=e.request, response=e.response)
-                                break  # 认证错误不重试
+                                    return error
+                                raise error
                                 
                             elif status_code == 429:
                                 logger.warning(f"[{request_id}] 请求频率限制，将重试")
@@ -223,8 +236,23 @@ class AsyncLLM:
                                 logger.warning(f"[{request_id}] 等待 {wait_time:.1f} 秒后重试...")
                                 await asyncio.sleep(wait_time)
                                 continue
+
+                            elif status_code == 400 and error_code == 1601:
+                                error = LLMRequestError(f"请求内容未通过审核 (HTTP 400): {error_text}")
+                                logger.error(f"[{request_id}] {error}")
+                                if return_exceptions:
+                                    return error
+                                raise error
+
+                            elif 400 <= status_code < 500:
+                                error = LLMRequestError(f"客户端请求错误 ({status_code}): {error_text}")
+                                logger.error(f"[{request_id}] {error}")
+                                if return_exceptions:
+                                    return error
+                                raise error
                                 
                             # 其他HTTP错误
+                            last_error = e
                             if attempt < retries - 1:
                                 wait_time = backoff_factor * (2 ** attempt)
                                 logger.warning(f"[{request_id}] 等待 {wait_time:.1f} 秒后重试...")
@@ -233,30 +261,38 @@ class AsyncLLM:
                                 logger.error(f"[{request_id}] 已达到最大重试次数")
                                 if return_exceptions:
                                     return e
-                                break
+                                raise LLMRequestError(f"LLM 请求失败，已达到最大重试次数: {error_text}") from e
                         
                 except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
                     elapsed = time.time() - start_time if 'start_time' in locals() else 0
                     logger.warning(f"[{request_id}] 连接/读取错误 ({type(e).__name__}): {str(e)} ({elapsed:.1f}秒)")
+                    last_error = e
 
                     if self._is_local_base_url(base_url):
-                        logger.error(f"[{request_id}] 本地 LLM 服务不可达 ({base_url})，直接使用离线回退响应")
+                        error = LLMRequestError(f"本地 LLM 服务不可达 ({base_url}): {str(e)}")
+                        logger.error(f"[{request_id}] {error}")
                         if return_exceptions:
-                            return e
-                        return self._fallback_response(prompt)
+                            return error
+                        raise error
                     
                     if attempt < retries - 1:
                         wait_time = backoff_factor * (2 ** attempt)
                         logger.warning(f"[{request_id}] 将在 {wait_time:.1f} 秒后重试...")
                         await asyncio.sleep(wait_time)
                     else:
-                        logger.error(f"[{request_id}] 连接失败，已达到最大重试次数: {str(e)}")
+                        error = LLMRequestError(f"连接失败，已达到最大重试次数: {str(e)}")
+                        logger.error(f"[{request_id}] {error}")
                         if return_exceptions:
-                            return e
+                            return error
+                        raise error
                         
+                except LLMRequestError:
+                    raise
+
                 except Exception as e:
                     elapsed = time.time() - start_time if 'start_time' in locals() else 0
                     logger.error(f"[{request_id}] 调用 LLM API 失败 ({elapsed:.1f}秒): {str(e)}")
+                    last_error = e
                     
                     if isinstance(logging.getLogger().level, int) and logging.getLogger().level <= logging.DEBUG:
                         logger.debug(f"[{request_id}] 异常详情: {traceback.format_exc()}")
@@ -269,12 +305,15 @@ class AsyncLLM:
                         logger.error(f"[{request_id}] 已达到最大重试次数")
                         if return_exceptions:
                             return e
+                        raise LLMRequestError(f"调用 LLM API 失败，已达到最大重试次数: {str(e)}") from e
             
-            # 所有重试都失败，返回后备响应
-            logger.error(f"[{request_id}] 所有 API 调用尝试都失败，返回后备响应")
+            # 所有重试都失败，抛出最终异常
+            logger.error(f"[{request_id}] 所有 API 调用尝试都失败")
             if return_exceptions:
-                return RuntimeError(f"所有API调用尝试都失败({retries}次)")
-            return self._fallback_response(prompt)
+                return LLMRequestError(f"所有API调用尝试都失败({retries}次)")
+            if isinstance(last_error, Exception):
+                raise LLMRequestError(f"所有API调用尝试都失败({retries}次): {str(last_error)}") from last_error
+            raise LLMRequestError(f"所有API调用尝试都失败({retries}次)")
     
     def _fallback_response(self, prompt: str) -> str:
         """当 LLM API 调用失败时的后备响应"""

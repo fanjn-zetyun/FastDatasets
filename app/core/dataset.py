@@ -59,29 +59,25 @@ class DatasetBuilder:
         
         # 步骤 1: 并行为每个文档块生成问题
         async def generate_questions_for_chunk(chunk):
-            try:
-                chunk_id = chunk.get('chunk_id', '')
-                file_name = chunk.get('file', '')
-                content = chunk.get('content', '')
-                summary = chunk.get('summary', '')
-                
-                # 优先使用显式配置的问题数量；缺失时再按内容长度兜底
-                question_count = self.questions_per_chunk or max(1, len(content) // 240)
-                
-                # 生成问题
-                questions = await self._generate_questions(content, question_count)
-                
-                # 返回问题列表，每个问题包含完整的块信息
-                return [{
-                    "chunk_id": chunk_id,
-                    "file": file_name,
-                    "summary": summary,
-                    "content": content,
-                    "question": q
-                } for q in questions]
-            except Exception as e:
-                logger.error(f"为文档块 {chunk.get('chunk_id', 'unknown')} 生成问题失败: {str(e)}")
-                return []  # 返回空列表而不是使整个处理失败
+            chunk_id = chunk.get('chunk_id', '')
+            file_name = chunk.get('file', '')
+            content = chunk.get('content', '')
+            summary = chunk.get('summary', '')
+            
+            # 优先使用显式配置的问题数量；缺失时再按内容长度兜底
+            question_count = self.questions_per_chunk or max(1, len(content) // 240)
+            
+            # 生成问题
+            questions = await self._generate_questions(content, question_count)
+            
+            # 返回问题列表，每个问题包含完整的块信息
+            return [{
+                "chunk_id": chunk_id,
+                "file": file_name,
+                "summary": summary,
+                "content": content,
+                "question": q
+            } for q in questions]
         
         # 并行处理所有文档块
         chunk_tasks = [generate_questions_for_chunk(chunk) for chunk in chunks]
@@ -96,116 +92,69 @@ class DatasetBuilder:
         
         # 步骤 2: 并行为每个问题生成答案和相关内容
         async def process_question(item):
-            try:
-                # 获取问题和上下文
-                question = item["question"]
-                context = item["content"]
-                
-                # 定义要执行的任务
-                tasks = [self._generate_answer(question, context)]
-                
-                # 注意: 思维链现在由 _generate_answer 根据 enable_cot 自动处理
-                # 不再需要单独调用 _generate_cot
-                
-                # 如果启用了标签生成，添加到任务中
-                if self.enable_label:
-                    tasks.append(self._generate_labels(question))
-                
-                # 同时执行所有任务
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # 整理结果，处理可能的异常
-                data_point = dict(item)
-                
-                # 处理答案结果 (第一个任务)
-                if isinstance(results[0], Exception):
-                    logger.error(f"生成答案失败: {str(results[0])}")
-                    data_point["answer"] = f"处理过程中发生错误: {str(results[0])}"
-                    data_point["error"] = True
+            # 获取问题和上下文
+            question = item["question"]
+            context = item["content"]
+            
+            # 定义要执行的任务
+            tasks = [self._generate_answer(question, context)]
+            
+            # 注意: 思维链现在由 _generate_answer 根据 enable_cot 自动处理
+            # 不再需要单独调用 _generate_cot
+            
+            # 如果启用了标签生成，添加到任务中
+            if self.enable_label:
+                tasks.append(self._generate_labels(question))
+            
+            # 同时执行所有任务
+            results = await asyncio.gather(*tasks)
+            
+            data_point = dict(item)
+            
+            # 处理答案结果 (第一个任务)
+            if isinstance(results[0], dict):
+                if 'choices' in results[0]:
+                    message = results[0]['choices'][0]['message']
+                    data_point["answer"] = (message.get('content') or '').strip()
+                    if 'reasoning_content' in message and message['reasoning_content']:
+                        data_point["reasoning_content"] = message['reasoning_content'].strip()
+                elif 'content' in results[0]:
+                    data_point["answer"] = results[0]['content']
+                    if 'reasoning_content' in results[0]:
+                        data_point["reasoning_content"] = results[0]['reasoning_content']
                 else:
-                    print(f"\n=== 处理答案结果 ===")
-                    print(f"结果类型: {type(results[0])}")
-                    if isinstance(results[0], dict):
-                        for k, v in results[0].items():
-                            if isinstance(v, str):
-                                print(f"{k}: {v[:100]}...")
-                            else:
-                                print(f"{k}: {type(v)}")
-                    else:
-                        print(f"结果内容: {str(results[0])[:100]}...")
-                    
-                    # 处理新的答案格式
-                    if isinstance(results[0], dict):
-                        if 'choices' in results[0]:
-                            # 直接处理API返回的JSON
-                            print("处理API原始返回")
-                            message = results[0]['choices'][0]['message']
-                            data_point["answer"] = (message.get('content') or '').strip()
-                            if 'reasoning_content' in message and message['reasoning_content']:
-                                print(f"找到推理内容: {message['reasoning_content'][:50]}...")
-                                data_point["reasoning_content"] = message['reasoning_content'].strip()
-                        elif 'content' in results[0]:
-                            # 处理格式化后的返回
-                            print("处理格式化返回")
-                            data_point["answer"] = results[0]['content']
-                            if 'reasoning_content' in results[0]:
-                                print(f"找到推理内容: {results[0]['reasoning_content'][:50]}...")
-                                data_point["reasoning_content"] = results[0]['reasoning_content']
-                        else:
-                            # 无法识别的格式
-                            print("无法识别的字典格式，直接使用字符串表示")
-                            data_point["answer"] = str(results[0])
-                    else:
-                        # 简单字符串返回
-                        print("处理简单字符串返回")
-                        data_point["answer"] = results[0]
+                    data_point["answer"] = str(results[0])
+            else:
+                data_point["answer"] = results[0]
+            
+            # 处理其他任务结果
+            task_index = 1
+            
+            if self.enable_label:
+                data_point["labels"] = results[task_index]
+                task_index += 1
+            
+            if self.enable_optimize:
+                optimize_tasks = []
                 
-                # 处理其他任务结果
-                task_index = 1
+                if "answer" in data_point:
+                    optimize_tasks.append(self._optimize_answer(data_point["answer"]))
                 
-                if self.enable_label:
-                    if isinstance(results[task_index], Exception):
-                        logger.error(f"生成标签失败: {str(results[task_index])}")
-                        data_point["labels"] = ["错误"]
-                    else:
-                        data_point["labels"] = results[task_index]
-                    task_index += 1
+                if self.enable_cot and "reasoning_content" in data_point:
+                    optimize_tasks.append(self._optimize_cot(data_point["reasoning_content"]))
                 
-                # 只有当没有错误且启用了优化时才执行优化任务
-                if self.enable_optimize and not data_point.get("error", False):
-                    optimize_tasks = []
+                if optimize_tasks:
+                    optimize_results = await asyncio.gather(*optimize_tasks)
                     
-                    # 只优化没有错误的内容
-                    if "answer" in data_point and not isinstance(data_point["answer"], Exception):
-                        optimize_tasks.append(self._optimize_answer(data_point["answer"]))
+                    result_index = 0
+                    if "answer" in data_point:
+                        data_point["answer"] = optimize_results[result_index]
+                        result_index += 1
                     
-                    # 优化 reasoning_content (如果启用了 CoT 且存在)
-                    if self.enable_cot and "reasoning_content" in data_point and not isinstance(data_point.get("reasoning_content"), Exception):
-                        optimize_tasks.append(self._optimize_cot(data_point["reasoning_content"]))
-                    
-                    if optimize_tasks:
-                        optimize_results = await asyncio.gather(*optimize_tasks, return_exceptions=True)
-                        
-                        # 更新优化结果
-                        result_index = 0
-                        if "answer" in data_point and not isinstance(data_point["answer"], Exception):
-                            if not isinstance(optimize_results[result_index], Exception):
-                                data_point["answer"] = optimize_results[result_index]
-                            result_index += 1
-                        
-                        if self.enable_cot and "reasoning_content" in data_point and not isinstance(data_point.get("reasoning_content"), Exception):
-                            if not isinstance(optimize_results[result_index], Exception):
-                                data_point["reasoning_content"] = optimize_results[result_index]
-                
-                return data_point
-            except Exception as e:
-                logger.error(f"处理问题失败: {item.get('question', '')[:30]}... - {str(e)}")
-                # 返回一个带有错误标记的条目，而不是完全失败
-                return {
-                    **item,
-                    "answer": f"处理过程中发生错误: {str(e)}",
-                    "error": True
-                }
+                    if self.enable_cot and "reasoning_content" in data_point:
+                        data_point["reasoning_content"] = optimize_results[result_index]
+            
+            return data_point
         
         # 动态计算最佳批处理大小
         max_concurrency = getattr(self, 'max_concurrency', 10)
@@ -235,33 +184,16 @@ class DatasetBuilder:
             batch_desc = f"生成答案 [批次 {i//batch_size+1}/{total_batches}]"
             batch_results = await tqdm_async.gather(*batch_tasks, desc=batch_desc)
             
-            # 收集所有结果，包括有错误的（便于后期分析）
             dataset.extend(batch_results)
             
-            # 计算批次成功率
-            success_count = sum(1 for item in batch_results if not item.get("error", False))
             if batch_results:
-                success_rate = success_count / len(batch_results) * 100
-                logger.info(f"批次 {i//batch_size+1}/{total_batches} 完成: "
-                           f"成功率 {success_rate:.1f}% ({success_count}/{len(batch_results)})")
+                logger.info(f"批次 {i//batch_size+1}/{total_batches} 完成: 成功 {len(batch_results)}/{len(batch_results)}")
             
             # 短暂休息，避免API限制
             if i + batch_size < total_questions:
                 await asyncio.sleep(0.5)
         
-        # 最终统计
-        success_count = sum(1 for item in dataset if not item.get("error", False))
-        error_count = sum(1 for item in dataset if item.get("error", False))
-        
-        logger.info(f"数据集构建完成，共 {len(dataset)} 个数据点 "
-                  f"(成功: {success_count}, 失败: {error_count})")
-        
-        # 可选：过滤掉出错的数据点
-        if error_count > 0:
-            clean_dataset = [item for item in dataset if not item.get("error", False)]
-            logger.info(f"已过滤 {error_count} 个失败的数据点，最终数据集大小: {len(clean_dataset)}")
-            return clean_dataset
-        
+        logger.info(f"数据集构建完成，共 {len(dataset)} 个数据点")
         return dataset
     
     def save_dataset(self, dataset: List[Dict[str, Any]], output_path: str):
@@ -686,7 +618,6 @@ Based on the text provided by the user(length: {len(context)} characters), gener
                     print(f"解析问题JSON失败: {str(e)}")
                     print(f"原始内容: {content}")
                     print(f"清理后内容: {cleaned_content}")
-                    # Fallback: 尝试用换行分割
                     lines = [line.strip() for line in cleaned_content.split('\n') if line.strip()]
                     return lines if lines else [cleaned_content]
             else:
@@ -703,13 +634,11 @@ Based on the text provided by the user(length: {len(context)} characters), gener
                         # 可能返回的是包含问题的对象
                         return [cleaned_content]
                 except Exception:
-                    # Fallback: 尝试用换行分割
                     lines = [line.strip() for line in cleaned_content.split('\n') if line.strip()]
                     return lines if lines else [cleaned_content]
         except Exception as e:
             logger.error(f"处理生成问题响应失败: {str(e)}")
-            # 出错时返回一个默认问题，避免整个流程中断
-            return [f"关于文本内容的问题 {number}"]
+            raise
 
     async def _generate_answer(self, question: str, context: str) -> str:
         """生成答案"""
