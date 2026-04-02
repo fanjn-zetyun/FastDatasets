@@ -98,6 +98,7 @@ def generate_dataset_to_dir(
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
     model_name: Optional[str] = None,
+    name: Optional[str] = None,
 ) -> List[dict]:
     """Generate dataset and export to directory in chosen formats.
 
@@ -121,8 +122,7 @@ def generate_dataset_to_dir(
     )
 
     builder = DatasetBuilder()
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    builder.export_dataset(dataset, str(output_dir), formats=formats, file_format=file_format)
+    builder.export_dataset(dataset, str(output_dir), formats=formats, file_format=file_format, name=name)
     return dataset
 
 

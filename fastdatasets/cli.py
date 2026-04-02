@@ -9,10 +9,10 @@ from app.core.document import DocumentProcessor
 from app.core.dataset import DatasetBuilder
 
 
-def run_generate(input_paths: List[str], output_dir: str, formats: List[str], file_format: str,
+def run_generate(input_paths: List[str], output_path: str, formats: List[str], file_format: str,
                  chunk_min_len: int = None, chunk_max_len: int = None,
                  questions_per_chunk: int = None, llm_concurrency: int = None,
-                 file_concurrency: int = None, enable_cot: bool = False):
+                 file_concurrency: int = None, enable_cot: bool = False, name: str = None):
     cfg = Config()
 
     # 环境变量覆盖（便于 CLI 直接注入）
@@ -51,8 +51,7 @@ def run_generate(input_paths: List[str], output_dir: str, formats: List[str], fi
     dataset = asyncio.run(builder.build_dataset(all_chunks))
 
     # 导出
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    builder.export_dataset(dataset, output_dir, formats=formats, file_format=file_format)
+    builder.export_dataset(dataset, output_path, formats=formats, file_format=file_format, name=name)
 
 
 def main():
@@ -61,7 +60,8 @@ def main():
 
     gen = sub.add_parser("generate", help="Generate dataset from files or directories")
     gen.add_argument("inputs", nargs="+", help="Input file(s) or directory(ies)")
-    gen.add_argument("-o", "--output", default="output", help="Output directory")
+    gen.add_argument("-o", "--output", default="output", help="Output directory or file path (e.g., /app/ok.json)")
+    gen.add_argument("-n", "--name", default=None, help="Dataset name (default: 'dataset')")
     gen.add_argument("-f", "--formats", default="alpaca", help="Export formats, comma-separated (alpaca,sharegpt)")
     gen.add_argument("--file-format", default="json", choices=["json", "jsonl"], help="Output file format")
     gen.add_argument("--chunk-min-len", type=int, default=None, help="Minimum chunk length")
@@ -78,7 +78,7 @@ def main():
         run_generate(args.inputs, args.output, formats=formats, file_format=args.file_format,
                      chunk_min_len=args.chunk_min_len, chunk_max_len=args.chunk_max_len,
                      questions_per_chunk=args.questions_per_chunk, llm_concurrency=args.llm_concurrency,
-                     file_concurrency=args.file_concurrency, enable_cot=args.enable_cot)
+                     file_concurrency=args.file_concurrency, enable_cot=args.enable_cot, name=args.name)
 
 
 if __name__ == "__main__":

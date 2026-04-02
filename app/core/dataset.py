@@ -294,28 +294,85 @@ class DatasetBuilder:
         except Exception as e:
             logger.error(f"保存数据集失败: {str(e)}")
 
-    def export_dataset(self, dataset: List[Dict[str, Any]], output_dir: str, formats: List[str], file_format: str = "json"):
+    def _get_unique_path(self, base_path: str) -> str:
+        """
+        获取唯一的文件路径，如果文件存在则添加后缀 _1, _2 等
+        
+        Args:
+            base_path: 基础路径
+            
+        Returns:
+            唯一的文件路径
+        """
+        if not os.path.exists(base_path):
+            return base_path
+        
+        # 分离路径和扩展名
+        dir_path = os.path.dirname(base_path)
+        filename = os.path.basename(base_path)
+        name, ext = os.path.splitext(filename)
+        
+        # 尝试添加后缀
+        counter = 1
+        while True:
+            new_filename = f"{name}_{counter}{ext}"
+            new_path = os.path.join(dir_path, new_filename)
+            if not os.path.exists(new_path):
+                return new_path
+            counter += 1
+
+    def export_dataset(self, dataset: List[Dict[str, Any]], output_path: str, formats: List[str], file_format: str = "json", name: str = None):
         """
         导出数据集为多种格式
         
         Args:
             dataset: 数据集
-            output_dir: 输出目录
+            output_path: 输出路径，可以是目录或具体文件路径
             formats: 导出格式列表，如 ["alpaca", "sharegpt"]
             file_format: 文件格式，如 "json" 或 "jsonl"
+            name: 数据集名称，默认为 "dataset"
         """
-        os.makedirs(output_dir, exist_ok=True)
+        # 如果提供了name参数，使用name作为数据集名称
+        # 否则，从output_path中提取数据集名称
+        if name:
+            dataset_name = name
+        else:
+            # 从output_path中提取数据集名称
+            # 例如：/workspace/user-data/datasets/fd-2026-03-31 -> fd-2026-03-31
+            dataset_name = os.path.basename(output_path)
+            # 如果dataset_name为空（例如output_path以/结尾），使用默认名称
+            if not dataset_name:
+                dataset_name = "dataset"
+        
+        # 判断 output_path 是文件路径还是目录
+        _, ext = os.path.splitext(output_path)
+        is_file_path = ext in [".json", ".jsonl"]
+        
+        if is_file_path:
+            # output_path 是具体文件路径，使用 name 作为文件名基础
+            output_dir = os.path.dirname(output_path) or "."
+            os.makedirs(output_dir, exist_ok=True)
+        else:
+            # output_path 是目录，但我们将它视为数据集名称的基础
+            # 例如：output_path = /workspace/user-data/datasets/fd-2026-03-31
+            # 我们将在这个目录下生成文件，文件名基于dataset_name
+            output_dir = os.path.dirname(output_path) or "."
+            # 确保输出目录存在
+            os.makedirs(output_dir, exist_ok=True)
         
         for fmt in formats:
             if fmt == "alpaca":
                 export_data = self._export_alpaca(dataset)
-                out_path = os.path.join(output_dir, f"dataset-alpaca.{file_format}")
+                out_path = os.path.join(output_dir, f"{dataset_name}-alpaca.{file_format}")
             elif fmt == "sharegpt":
                 export_data = self._export_sharegpt(dataset)
-                out_path = os.path.join(output_dir, f"dataset-sharegpt.{file_format}")
+                out_path = os.path.join(output_dir, f"{dataset_name}-sharegpt.{file_format}")
             else:
                 logger.warning(f"不支持的导出格式: {fmt}")
                 continue
+            
+            # 获取唯一路径（处理文件名冲突）
+            out_path = self._get_unique_path(out_path)
                 
             self._save_output(export_data, out_path, file_format)
             logger.info(f"已导出 {fmt} 格式: {out_path}")

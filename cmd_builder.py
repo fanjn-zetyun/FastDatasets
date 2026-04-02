@@ -56,9 +56,9 @@ def build_command(params):
     os.environ["LLM_API_BASE"] = params.get("base_url", "")
     os.environ["LLM_MODEL"] = params.get("model_name", "")
 
-    # 提取参数
-    input_files = params.get("input_files", [])
-    output_dir = params.get("output_dir", OUTPUT_DIR)
+    # 提取参数 - 兼容 file_path_input 和 input_files 两种参数名
+    input_files = params.get("file_path_input", params.get("input_files", []))
+    output_path = params.get("export_path", '')
     output_formats = params.get("output_formats", ["alpaca", "sharegpt"])
     chunk_min_len = params.get("chunk_min_len", 200)
     chunk_max_len = params.get("chunk_max_len", 1000)
@@ -66,12 +66,17 @@ def build_command(params):
     enable_cot = params.get("enable_cot", False)
     llm_concurrency = params.get("llm_concurrency", 3)
     file_concurrency = params.get("file_concurrency", 2)
+    name = params.get("name", None)
 
     # 构建命令参数列表
+    # 注意：FastDatasets工具会自动处理同名数据集文件，会在文件名后添加_1, _2等后缀
+    # 例如：export_path=/workspace/user-data/datasets/fd-2026-03-31
+    # 生成的文件：/workspace/user-data/datasets/fd-2026-03-31-alpaca.json
+    # 如果文件已存在，会自动重命名为：/workspace/user-data/datasets/fd-2026-03-31-alpaca_1.json
     cmd_parts = [
         "fastdatasets", "generate",
         *input_files,
-        "-o", output_dir,
+        "-o", output_path,
         "-f", ",".join(output_formats),
         "--chunk-min-len", str(chunk_min_len),
         "--chunk-max-len", str(chunk_max_len),
@@ -82,6 +87,9 @@ def build_command(params):
 
     if enable_cot:
         cmd_parts.append("--enable-cot")
+    
+    if name:
+        cmd_parts.extend(["-n", name])
 
     return cmd_parts
 

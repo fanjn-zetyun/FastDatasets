@@ -23,6 +23,13 @@ log "=========================================="
 # 将日志文件路径导出为环境变量，供 cmd_builder.py 使用
 export FASTDATASETS_LOG_FILE="$LOG_FILE"
 
+# 验证FASTDATASETS_PARAMS环境变量是否存在
+if [ -z "$FASTDATASETS_PARAMS" ]; then
+    log "ERROR: FASTDATASETS_PARAMS environment variable is not set"
+    exit 1
+fi
+
+log "FASTDATASETS_PARAMS environment variable is set"
 log "Building FastDatasets command..."
 python3 /app/cmd_builder.py
 

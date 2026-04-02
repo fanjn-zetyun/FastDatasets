@@ -128,7 +128,7 @@ class AsyncLLM:
                             
                             # 解析响应
                             response_json = resp.json()
-                            print(f"完整响应: {response_json}")
+                            # print(f"完整响应: {response_json}")
                             
                             # 处理响应格式，返回完整的响应JSON，方便处理推理内容
                             logger.debug(f"[{request_id}] 请求成功，耗时 {elapsed:.2f}秒")
