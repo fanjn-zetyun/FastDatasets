@@ -344,12 +344,12 @@ class DatasetBuilder:
         try:
             response = httpx.post(callback_url, json=payload, timeout=30.0)
             response.raise_for_status()
-            logger.info(f"数据结果路径回调成功: {callback_url}")
+            logger.info(f"数据结果路径回调成功")
             self._append_callback_log(
                 f"数据结果路径回调成功: url={callback_url}, status_code={response.status_code}, response={response.text}"
             )
         except Exception as exc:
-            logger.error(f"数据结果路径回调失败: {callback_url}, error: {exc}")
+            logger.error(f"数据结果路径回调失败 error: {exc}")
             self._append_callback_log(f"数据结果路径回调失败: url={callback_url}, error={exc}")
 
     def _append_callback_log(self, message: str) -> None:
