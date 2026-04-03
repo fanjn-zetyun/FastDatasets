@@ -161,7 +161,8 @@ class AsyncLLM:
                     data = {
                         "model": self.model_name,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": max_tokens
+                        "max_tokens": max_tokens,
+                        "request_source": "ONLINE_WEB"
                     }
                     
                     # 可选: 添加系统提示
