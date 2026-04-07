@@ -34,7 +34,7 @@ async def process_document(file_path: str, output_dir: str = None, output_format
         
         if not chunks:
             logger.error(f"文档处理失败: {file_path}")
-            return
+            raise RuntimeError(f"文档处理失败: {file_path}")
         
         # 生成数据集
         dataset = await builder.build_dataset(chunks)
@@ -67,7 +67,7 @@ async def process_document(file_path: str, output_dir: str = None, output_format
         logger.error(f"处理文档失败 {file_path}: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
-        return None
+        raise
 
 async def main():
     """主函数"""
@@ -145,9 +145,9 @@ async def main():
                 json.dump(summary, f, ensure_ascii=False, indent=2)
             logger.info(f"处理汇总已保存到: {summary_path}")
         else:
-            logger.warning(f"未找到可处理的文件: {args.input}")
+            raise FileNotFoundError(f"未找到可处理的文件: {args.input}")
     else:
-        logger.error(f"无效的输入路径: {args.input}")
+        raise FileNotFoundError(f"无效的输入路径: {args.input}")
 
 if __name__ == "__main__":
     # 设置更大的默认并发数
@@ -180,4 +180,8 @@ if __name__ == "__main__":
     if hasattr(asyncio, 'events'):
         asyncio.events._MAX_COMPLETED_QUEUE_SIZE = 10000
     
-    asyncio.run(main()) 
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.error(f"数据集生成失败: {str(e)}")
+        raise

@@ -45,5 +45,10 @@ if [ "$cmd_status" -ne 0 ]; then
     exit "$cmd_status"
 fi
 
+if grep -qi "error" "$LOG_FILE"; then
+    log "ERROR: Detected error logs during FastDatasets execution"
+    exit 1
+fi
+
 log "FastDatasets completed successfully!"
 log "=========================================="
