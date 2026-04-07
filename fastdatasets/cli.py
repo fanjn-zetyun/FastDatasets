@@ -42,12 +42,6 @@ def run_generate(input_paths: List[str], output_path: str, formats: List[str], f
     if enable_cot:
         config.ENABLE_COT = True
 
-    effective_file_format = "jsonl"
-    if file_format != effective_file_format:
-        logger.info(
-            f"流式数据集导出统一使用 jsonl 格式，已忽略传入的 file_format={file_format}，实际输出格式: {effective_file_format}"
-        )
-
     processor = DocumentProcessor()
     builder = DatasetBuilder()
 
@@ -63,12 +57,7 @@ def run_generate(input_paths: List[str], output_path: str, formats: List[str], f
             chunks = processor.process_document(str(path))
             all_chunks.extend(chunks)
 
-    stream_targets = builder.prepare_stream_exports(
-        output_path,
-        formats=formats,
-        file_format=effective_file_format,
-        name=name,
-    )
+    stream_targets = builder.prepare_stream_exports(output_path, formats=formats, file_format=file_format, name=name)
 
     previous_sigint = signal.getsignal(signal.SIGINT)
     previous_sigterm = signal.getsignal(signal.SIGTERM)
@@ -83,13 +72,13 @@ def run_generate(input_paths: List[str], output_path: str, formats: List[str], f
                 keep_in_memory=False,
             )
         )
-        finalized_paths = builder.finalize_stream_exports(stream_targets, file_format=effective_file_format)
+        finalized_paths = builder.finalize_stream_exports(stream_targets, file_format=file_format)
         callback_ok = builder.notify_result_paths(finalized_paths)
         if callback_ok and finalized_paths:
             logger.info(f"数据集生成成功，结果文件路径: {', '.join(finalized_paths)}")
     except KeyboardInterrupt:
         logger.warning("数据集生成任务被中断，开始整理已生成的部分结果")
-        finalized_paths = builder.finalize_stream_exports(stream_targets, file_format=effective_file_format)
+        finalized_paths = builder.finalize_stream_exports(stream_targets, file_format=file_format)
         if finalized_paths:
             callback_ok = builder.notify_result_paths(finalized_paths)
             if callback_ok:
@@ -129,3 +118,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

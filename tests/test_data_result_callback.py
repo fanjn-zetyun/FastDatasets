@@ -75,7 +75,7 @@ def test_export_dataset_callbacks_after_success(monkeypatch, tmp_path):
     assert "response=ok" in log_text
 
 
-def test_stream_exports_finalize_to_jsonl_and_callback(monkeypatch, tmp_path):
+def test_stream_exports_can_finalize_partial_results_and_callback(monkeypatch, tmp_path):
     builder = DatasetBuilder()
     callback_calls = []
 
@@ -105,7 +105,7 @@ def test_stream_exports_finalize_to_jsonl_and_callback(monkeypatch, tmp_path):
     stream_targets = builder.prepare_stream_exports(
         str(tmp_path / "job-partial"),
         formats=["alpaca", "sharegpt"],
-        file_format="jsonl",
+        file_format="json",
     )
     builder.append_stream_exports(
         [
@@ -117,12 +117,12 @@ def test_stream_exports_finalize_to_jsonl_and_callback(monkeypatch, tmp_path):
         stream_targets,
     )
 
-    finalized_paths = builder.finalize_stream_exports(stream_targets, file_format="jsonl")
+    finalized_paths = builder.finalize_stream_exports(stream_targets, file_format="json")
     builder.notify_result_paths(finalized_paths)
 
     expected_paths = [
-        str(tmp_path / "job-partial-alpaca.jsonl"),
-        str(tmp_path / "job-partial-sharegpt.jsonl"),
+        str(tmp_path / "job-partial-alpaca.json"),
+        str(tmp_path / "job-partial-sharegpt.json"),
     ]
 
     assert finalized_paths == expected_paths
@@ -139,8 +139,8 @@ def test_stream_exports_finalize_to_jsonl_and_callback(monkeypatch, tmp_path):
 
     for path in expected_paths:
         with open(path, "r", encoding="utf-8") as file_obj:
-            lines = [json.loads(line) for line in file_obj if line.strip()]
-        assert lines
+            data = json.load(file_obj)
+        assert data
 
 
 def test_cli_interrupt_callbacks_partial_results(monkeypatch, tmp_path):
