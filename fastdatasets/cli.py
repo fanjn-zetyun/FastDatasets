@@ -73,12 +73,16 @@ def run_generate(input_paths: List[str], output_path: str, formats: List[str], f
             )
         )
         finalized_paths = builder.finalize_stream_exports(stream_targets, file_format=file_format)
-        builder.notify_result_paths(finalized_paths)
+        callback_ok = builder.notify_result_paths(finalized_paths)
+        if callback_ok and finalized_paths:
+            logger.info(f"数据集生成成功，结果文件路径: {', '.join(finalized_paths)}")
     except KeyboardInterrupt:
         logger.warning("数据集生成任务被中断，开始整理已生成的部分结果")
         finalized_paths = builder.finalize_stream_exports(stream_targets, file_format=file_format)
         if finalized_paths:
-            builder.notify_result_paths(finalized_paths)
+            callback_ok = builder.notify_result_paths(finalized_paths)
+            if callback_ok:
+                logger.info(f"数据集部分结果已生成并回调成功，结果文件路径: {', '.join(finalized_paths)}")
         raise
     finally:
         signal.signal(signal.SIGINT, previous_sigint)
@@ -114,5 +118,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

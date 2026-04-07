@@ -39,6 +39,7 @@ class DatasetBuilder:
             max_concurrency=self.max_concurrency,
             system_prompt=self.system_prompt
         )
+        self._stream_write_started = False
         logger.info("DatasetBuilder 初始化")
 
     async def build_dataset(
@@ -335,12 +336,27 @@ class DatasetBuilder:
             prepared_target["stream_path"] = stream_path
             prepared_targets.append(prepared_target)
 
+        if prepared_targets:
+            target_descriptions = ", ".join(
+                f"{target['format']}->{target['final_path']}" for target in prepared_targets
+            )
+            logger.info(f"已准备数据集流式落盘目标，等待首批 QA 生成后开始写入: {target_descriptions}")
+
         return prepared_targets
 
     def append_stream_exports(self, dataset_batch: List[Dict[str, Any]], export_targets: List[Dict[str, str]]) -> None:
         """将本批次结果增量写入流式导出文件。"""
         if not dataset_batch:
             return
+
+        if not self._stream_write_started:
+            self._stream_write_started = True
+            target_descriptions = ", ".join(
+                f"{target['format']}->{target['stream_path']}" for target in export_targets if target.get("stream_path")
+            )
+            logger.info(
+                f"开始落盘数据集文件: 首批 {len(dataset_batch)} 条 QA 已生成，后续将边生成边持续写入文件 -> {target_descriptions}"
+            )
 
         for target in export_targets:
             fmt = target["format"]
@@ -374,11 +390,11 @@ class DatasetBuilder:
 
         return finalized_paths
 
-    def notify_result_paths(self, result_paths: List[str]) -> None:
+    def notify_result_paths(self, result_paths: List[str]) -> bool:
         """公开结果路径回调，便于部分结果回调复用。"""
-        self._notify_export_results(result_paths)
+        return self._notify_export_results(result_paths)
 
-    def _notify_export_results(self, exported_paths: List[str]) -> None:
+    def _notify_export_results(self, exported_paths: List[str]) -> bool:
         """在数据集文件成功生成后回调结果路径。"""
         callback_url = (os.getenv("CALLBACK_URL") or "").strip()
         task_id = (os.getenv("TASK_ID") or "").strip()
@@ -386,18 +402,18 @@ class DatasetBuilder:
         if not callback_url:
             logger.info("未配置 CALLBACK_URL，跳过数据结果路径回调")
             self._append_callback_log("未配置 CALLBACK_URL，跳过数据结果路径回调")
-            return
+            return False
 
         if not task_id:
             logger.warning("未配置 TASK_ID，跳过数据结果路径回调")
             self._append_callback_log("未配置 TASK_ID，跳过数据结果路径回调")
-            return
+            return False
 
         successful_paths = [path for path in exported_paths if path and os.path.exists(path)]
         if not successful_paths:
             logger.warning("没有成功生成的数据集文件，跳过数据结果路径回调")
             self._append_callback_log("没有成功生成的数据集文件，跳过数据结果路径回调")
-            return
+            return False
 
         payload = [{"id": task_id, "resultPath": path} for path in successful_paths]
         self._append_callback_log(
@@ -411,9 +427,11 @@ class DatasetBuilder:
             self._append_callback_log(
                 f"数据结果路径回调成功: url={callback_url}, status_code={response.status_code}, response={response.text}"
             )
+            return True
         except Exception as exc:
             logger.error(f"数据结果路径回调失败 error: {exc}")
             self._append_callback_log(f"数据结果路径回调失败: url={callback_url}, error={exc}")
+            return False
 
     def _append_callback_log(self, message: str) -> None:
         """将回调日志追加到 entrypoint.sh 使用的同一日志文件。"""
