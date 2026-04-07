@@ -1,12 +1,23 @@
 import argparse
 import asyncio
 import os
+import signal
 from pathlib import Path
 from typing import List
 
 from app.core.config import config
 from app.core.document import DocumentProcessor
 from app.core.dataset import DatasetBuilder
+from app.core.logger import logger
+
+
+class GenerationInterrupted(KeyboardInterrupt):
+    """用于将 SIGTERM/SIGINT 转换为可收尾的中断异常。"""
+
+
+def _raise_interrupt(signum, _frame):
+    signal_name = signal.Signals(signum).name
+    raise GenerationInterrupted(f"Received {signal_name}")
 
 
 def run_generate(input_paths: List[str], output_path: str, formats: List[str], file_format: str,
@@ -46,10 +57,32 @@ def run_generate(input_paths: List[str], output_path: str, formats: List[str], f
             chunks = processor.process_document(str(path))
             all_chunks.extend(chunks)
 
-    dataset = asyncio.run(builder.build_dataset(all_chunks))
+    stream_targets = builder.prepare_stream_exports(output_path, formats=formats, file_format=file_format, name=name)
 
-    # 导出
-    builder.export_dataset(dataset, output_path, formats=formats, file_format=file_format, name=name)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGINT, _raise_interrupt)
+    signal.signal(signal.SIGTERM, _raise_interrupt)
+
+    try:
+        asyncio.run(
+            builder.build_dataset(
+                all_chunks,
+                on_batch_complete=lambda batch: builder.append_stream_exports(batch, stream_targets),
+                keep_in_memory=False,
+            )
+        )
+        finalized_paths = builder.finalize_stream_exports(stream_targets, file_format=file_format)
+        builder.notify_result_paths(finalized_paths)
+    except KeyboardInterrupt:
+        logger.warning("数据集生成任务被中断，开始整理已生成的部分结果")
+        finalized_paths = builder.finalize_stream_exports(stream_targets, file_format=file_format)
+        if finalized_paths:
+            builder.notify_result_paths(finalized_paths)
+        raise
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def main():
@@ -81,6 +114,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 

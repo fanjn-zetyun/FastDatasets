@@ -3,7 +3,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Union
+from typing import Callable, List, Dict, Any, Optional, Union
 import asyncio
 import httpx
 from tqdm.asyncio import tqdm as tqdm_async
@@ -41,7 +41,12 @@ class DatasetBuilder:
         )
         logger.info("DatasetBuilder 初始化")
 
-    async def build_dataset(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def build_dataset(
+        self,
+        chunks: List[Dict[str, Any]],
+        on_batch_complete: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        keep_in_memory: bool = True,
+    ) -> List[Dict[str, Any]]:
         """
         构建数据集 - 全异步处理
         
@@ -172,7 +177,8 @@ class DatasetBuilder:
             batch_size = min(30, max(5, max_concurrency))
         
         logger.info(f"使用批处理大小: {batch_size}, 总并发数: {max_concurrency}")
-        dataset = []
+        dataset: List[Dict[str, Any]] = []
+        generated_count = 0
         
         # 计算总批次数
         total_batches = (total_questions + batch_size - 1) // batch_size
@@ -183,8 +189,13 @@ class DatasetBuilder:
             # 使用tqdm显示进度
             batch_desc = f"生成答案 [批次 {i//batch_size+1}/{total_batches}]"
             batch_results = await tqdm_async.gather(*batch_tasks, desc=batch_desc)
-            
-            dataset.extend(batch_results)
+
+            if on_batch_complete and batch_results:
+                on_batch_complete(batch_results)
+
+            if keep_in_memory:
+                dataset.extend(batch_results)
+            generated_count += len(batch_results)
             
             if batch_results:
                 logger.info(f"批次 {i//batch_size+1}/{total_batches} 完成: 成功 {len(batch_results)}/{len(batch_results)}")
@@ -193,7 +204,7 @@ class DatasetBuilder:
             if i + batch_size < total_questions:
                 await asyncio.sleep(0.5)
         
-        logger.info(f"数据集构建完成，共 {len(dataset)} 个数据点")
+        logger.info(f"数据集构建完成，共 {generated_count} 个数据点")
         return dataset
     
     def save_dataset(self, dataset: List[Dict[str, Any]], output_path: str):
@@ -255,7 +266,15 @@ class DatasetBuilder:
                 return new_path
             counter += 1
 
-    def export_dataset(self, dataset: List[Dict[str, Any]], output_path: str, formats: List[str], file_format: str = "json", name: str = None):
+    def export_dataset(
+        self,
+        dataset: List[Dict[str, Any]],
+        output_path: str,
+        formats: List[str],
+        file_format: str = "json",
+        name: str = None,
+        notify_callback: bool = True,
+    ) -> List[str]:
         """
         导出数据集为多种格式
         
@@ -266,54 +285,98 @@ class DatasetBuilder:
             file_format: 文件格式，如 "json" 或 "jsonl"
             name: 数据集名称，默认为 "dataset"
         """
-        # 如果提供了name参数，使用name作为数据集名称
-        # 否则，从output_path中提取数据集名称
-        if name:
-            dataset_name = name
-        else:
-            # 从output_path中提取数据集名称
-            # 例如：/workspace/user-data/datasets/fd-2026-03-31 -> fd-2026-03-31
-            dataset_name = os.path.basename(output_path)
-            # 如果dataset_name为空（例如output_path以/结尾），使用默认名称
-            if not dataset_name:
-                dataset_name = "dataset"
-        
-        # 判断 output_path 是文件路径还是目录
-        _, ext = os.path.splitext(output_path)
-        is_file_path = ext in [".json", ".jsonl"]
-        
-        if is_file_path:
-            # output_path 是具体文件路径，使用 name 作为文件名基础
-            output_dir = os.path.dirname(output_path) or "."
-            os.makedirs(output_dir, exist_ok=True)
-        else:
-            # output_path 是目录，但我们将它视为数据集名称的基础
-            # 例如：output_path = /workspace/user-data/datasets/fd-2026-03-31
-            # 我们将在这个目录下生成文件，文件名基于dataset_name
-            output_dir = os.path.dirname(output_path) or "."
-            # 确保输出目录存在
-            os.makedirs(output_dir, exist_ok=True)
-
         exported_paths: List[str] = []
-        for fmt in formats:
+        export_targets = self._build_export_targets(output_path, formats, file_format, name=name, ensure_unique=True)
+        for target in export_targets:
+            fmt = target["format"]
             if fmt == "alpaca":
                 export_data = self._export_alpaca(dataset)
-                out_path = os.path.join(output_dir, f"{dataset_name}-alpaca.{file_format}")
             elif fmt == "sharegpt":
                 export_data = self._export_sharegpt(dataset)
-                out_path = os.path.join(output_dir, f"{dataset_name}-sharegpt.{file_format}")
             else:
                 logger.warning(f"不支持的导出格式: {fmt}")
                 continue
-            
-            # 获取唯一路径（处理文件名冲突）
-            out_path = self._get_unique_path(out_path)
-                
+
+            out_path = target["final_path"]
             self._save_output(export_data, out_path, file_format)
             logger.info(f"已导出 {fmt} 格式: {out_path}")
             exported_paths.append(out_path)
 
-        self._notify_export_results(exported_paths)
+        if notify_callback:
+            self._notify_export_results(exported_paths)
+        return exported_paths
+
+    def prepare_stream_exports(
+        self,
+        output_path: str,
+        formats: List[str],
+        file_format: str = "json",
+        name: str = None,
+    ) -> List[Dict[str, str]]:
+        """为边生成边导出准备流式落盘目标。"""
+        export_targets = self._build_export_targets(output_path, formats, file_format, name=name, ensure_unique=True)
+        prepared_targets: List[Dict[str, str]] = []
+
+        for target in export_targets:
+            final_path = target["final_path"]
+            if file_format == "jsonl":
+                stream_path = final_path
+            else:
+                stream_path = str(Path(final_path).with_suffix(".partial.jsonl"))
+
+            stream_dir = os.path.dirname(stream_path)
+            if stream_dir:
+                os.makedirs(stream_dir, exist_ok=True)
+
+            with open(stream_path, "w", encoding="utf-8"):
+                pass
+
+            prepared_target = dict(target)
+            prepared_target["stream_path"] = stream_path
+            prepared_targets.append(prepared_target)
+
+        return prepared_targets
+
+    def append_stream_exports(self, dataset_batch: List[Dict[str, Any]], export_targets: List[Dict[str, str]]) -> None:
+        """将本批次结果增量写入流式导出文件。"""
+        if not dataset_batch:
+            return
+
+        for target in export_targets:
+            fmt = target["format"]
+            if fmt == "alpaca":
+                export_data = self._export_alpaca(dataset_batch)
+            elif fmt == "sharegpt":
+                export_data = self._export_sharegpt(dataset_batch)
+            else:
+                logger.warning(f"不支持的导出格式: {fmt}")
+                continue
+
+            self._append_jsonl_output(export_data, target["stream_path"])
+
+    def finalize_stream_exports(self, export_targets: List[Dict[str, str]], file_format: str = "json") -> List[str]:
+        """将流式导出文件收尾为最终结果文件，并返回已有数据的结果路径。"""
+        finalized_paths: List[str] = []
+
+        for target in export_targets:
+            stream_path = target["stream_path"]
+            final_path = target["final_path"]
+            records = self._load_jsonl_output(stream_path)
+            if not records:
+                continue
+
+            if file_format == "jsonl":
+                finalized_paths.append(final_path)
+                continue
+
+            self._save_output(records, final_path, file_format)
+            finalized_paths.append(final_path)
+
+        return finalized_paths
+
+    def notify_result_paths(self, result_paths: List[str]) -> None:
+        """公开结果路径回调，便于部分结果回调复用。"""
+        self._notify_export_results(result_paths)
 
     def _notify_export_results(self, exported_paths: List[str]) -> None:
         """在数据集文件成功生成后回调结果路径。"""
@@ -369,6 +432,67 @@ class DatasetBuilder:
                 file_obj.write(line)
         except Exception as exc:
             logger.error(f"写入回调日志文件失败: {log_file}, error: {exc}")
+
+    def _build_export_targets(
+        self,
+        output_path: str,
+        formats: List[str],
+        file_format: str,
+        name: str = None,
+        ensure_unique: bool = True,
+    ) -> List[Dict[str, str]]:
+        """解析导出格式与最终文件路径。"""
+        dataset_name = name or os.path.basename(output_path) or "dataset"
+        _, ext = os.path.splitext(output_path)
+        is_file_path = ext in [".json", ".jsonl"]
+
+        if is_file_path:
+            output_dir = os.path.dirname(output_path) or "."
+        else:
+            output_dir = os.path.dirname(output_path) or "."
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        targets: List[Dict[str, str]] = []
+        for fmt in formats:
+            if fmt not in {"alpaca", "sharegpt"}:
+                targets.append({"format": fmt, "final_path": ""})
+                continue
+
+            final_path = os.path.join(output_dir, f"{dataset_name}-{fmt}.{file_format}")
+            if ensure_unique:
+                final_path = self._get_unique_path(final_path)
+
+            targets.append({
+                "format": fmt,
+                "final_path": final_path,
+            })
+
+        return targets
+
+    def _append_jsonl_output(self, data: List[Dict[str, Any]], output_path: str) -> None:
+        """将记录逐条追加到 JSONL 文件。"""
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        with open(output_path, "a", encoding="utf-8") as f:
+            for item in data:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    def _load_jsonl_output(self, output_path: str) -> List[Dict[str, Any]]:
+        """读取 JSONL 文件中的已生成记录。"""
+        if not output_path or not os.path.exists(output_path):
+            return []
+
+        records: List[Dict[str, Any]] = []
+        with open(output_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                records.append(json.loads(line))
+        return records
     
     def _export_alpaca(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """导出为 Alpaca 格式"""
