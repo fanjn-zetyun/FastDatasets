@@ -6,7 +6,7 @@ from typing import Iterable, List, Optional, Union
 
 from app.core.config import Config, config
 from app.core.document import DocumentProcessor
-from app.core.dataset import DatasetBuilder
+from app.core.dataset import DatasetBuilder, DatasetBuildFailure
 
 
 InputPaths = Union[str, Path, Iterable[Union[str, Path]]]
@@ -109,20 +109,24 @@ def generate_dataset_to_dir(
     # Apply overrides including output formats
     _apply_overrides(api_key, api_base, model_name, enable_cot, max_llm_concurrency, formats)
 
-    dataset = generate_dataset(
-        inputs,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        enable_cot=enable_cot,
-        max_llm_concurrency=max_llm_concurrency,
-        api_key=api_key,
-        api_base=api_base,
-        model_name=model_name,
-    )
-
     builder = DatasetBuilder()
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    try:
+        dataset = generate_dataset(
+            inputs,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            enable_cot=enable_cot,
+            max_llm_concurrency=max_llm_concurrency,
+            api_key=api_key,
+            api_base=api_base,
+            model_name=model_name,
+        )
+    except DatasetBuildFailure as exc:
+        if exc.partial_dataset:
+            builder.export_dataset(exc.partial_dataset, str(output_dir), formats=formats, file_format=file_format)
+        raise
+
     builder.export_dataset(dataset, str(output_dir), formats=formats, file_format=file_format)
     return dataset
-
 

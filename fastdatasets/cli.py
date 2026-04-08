@@ -7,7 +7,7 @@ from typing import List
 
 from app.core.config import config
 from app.core.document import DocumentProcessor
-from app.core.dataset import DatasetBuilder
+from app.core.dataset import DatasetBuilder, DatasetBuildFailure
 from app.core.logger import logger
 
 
@@ -87,6 +87,14 @@ def run_generate(input_paths: List[str], output_path: str, formats: List[str], f
         callback_ok = builder.notify_result_paths(finalized_paths)
         if callback_ok and finalized_paths:
             logger.info(f"数据集生成成功，结果文件路径: {', '.join(finalized_paths)}")
+    except DatasetBuildFailure:
+        logger.warning("数据集生成存在文档级失败，开始整理已生成的部分结果")
+        finalized_paths = builder.finalize_stream_exports(stream_targets, file_format=effective_file_format)
+        if finalized_paths:
+            callback_ok = builder.notify_result_paths(finalized_paths)
+            if callback_ok:
+                logger.info(f"数据集部分结果已生成并回调成功，结果文件路径: {', '.join(finalized_paths)}")
+        raise
     except KeyboardInterrupt:
         logger.warning("数据集生成任务被中断，开始整理已生成的部分结果")
         finalized_paths = builder.finalize_stream_exports(stream_targets, file_format=effective_file_format)

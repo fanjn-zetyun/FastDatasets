@@ -1,6 +1,7 @@
 import os
 import json
 import re
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Dict, Any, Optional, Union
@@ -13,6 +14,23 @@ import random
 import time
 import logging
 from app.core.llm import AsyncLLM
+
+
+class DatasetBuildFailure(Exception):
+    """整篇文档全部失败时抛出的异常，保留已成功生成的部分结果。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        document_failures: List[Dict[str, Any]],
+        failed_parts: List[Dict[str, Any]],
+        partial_dataset: Optional[List[Dict[str, Any]]] = None,
+    ):
+        super().__init__(message)
+        self.document_failures = document_failures
+        self.failed_parts = failed_parts
+        self.partial_dataset = partial_dataset or []
 
 class DatasetBuilder:
     """数据集构建器，用于从文档块构建训练数据集"""
@@ -40,6 +58,8 @@ class DatasetBuilder:
             system_prompt=self.system_prompt
         )
         self._stream_write_started = False
+        self.last_failed_parts: List[Dict[str, Any]] = []
+        self.last_document_failures: List[Dict[str, Any]] = []
         logger.info("DatasetBuilder 初始化")
 
     async def build_dataset(
@@ -60,30 +80,55 @@ class DatasetBuilder:
         if not chunks:
             logger.warning("没有文档块，无法构建数据集")
             return []
+
+        self.last_failed_parts = []
+        self.last_document_failures = []
             
         logger.info(f"开始构建数据集，共 {len(chunks)} 个文档块")
         
         # 步骤 1: 并行为每个文档块生成问题
         async def generate_questions_for_chunk(chunk):
-            chunk_id = chunk.get('chunk_id', '')
-            file_name = chunk.get('file', '')
-            content = chunk.get('content', '')
-            summary = chunk.get('summary', '')
-            
-            # 优先使用显式配置的问题数量；缺失时再按内容长度兜底
-            question_count = self.questions_per_chunk or max(1, len(content) // 240)
-            
-            # 生成问题
-            questions = await self._generate_questions(content, question_count)
-            
-            # 返回问题列表，每个问题包含完整的块信息
-            return [{
-                "chunk_id": chunk_id,
-                "file": file_name,
-                "summary": summary,
-                "content": content,
-                "question": q
-            } for q in questions]
+            chunk_id = chunk.get("chunk_id", "")
+            file_name = chunk.get("file", "")
+            content = chunk.get("content", "")
+            summary = chunk.get("summary", "")
+
+            try:
+                question_count = self.questions_per_chunk or max(1, len(content) // 240)
+                questions = await self._generate_questions(content, question_count)
+                valid_questions = [str(q).strip() for q in questions if str(q).strip()]
+                if not valid_questions:
+                    raise ValueError("未生成有效问题")
+
+                return {
+                    "success": True,
+                    "chunk_key": self._get_chunk_key(chunk),
+                    "questions": [
+                        {
+                            "chunk_id": chunk_id,
+                            "file": file_name,
+                            "summary": summary,
+                            "content": content,
+                            "question": q,
+                        }
+                        for q in valid_questions
+                    ],
+                }
+            except Exception as exc:
+                detail = self._build_failure_detail(
+                    chunk,
+                    stage="question_generation",
+                    exc=exc,
+                )
+                logger.warning(
+                    f"文档块生成问题失败，已跳过: file={detail['file']}, chunk_id={detail['chunk_id']}, error={detail['error_message']}"
+                )
+                return {
+                    "success": False,
+                    "chunk_key": self._get_chunk_key(chunk),
+                    "failure": detail,
+                    "questions": [],
+                }
         
         # 并行处理所有文档块
         chunk_tasks = [generate_questions_for_chunk(chunk) for chunk in chunks]
@@ -91,76 +136,91 @@ class DatasetBuilder:
         
         # 合并所有问题
         all_questions = []
+        failed_parts: List[Dict[str, Any]] = []
         for result in chunk_results:
-            all_questions.extend(result)
+            if result.get("success"):
+                all_questions.extend(result["questions"])
+            else:
+                failed_parts.append(result["failure"])
         
         logger.info(f"已生成 {len(all_questions)} 个问题，开始生成答案...")
         
         # 步骤 2: 并行为每个问题生成答案和相关内容
         async def process_question(item):
-            # 获取问题和上下文
-            question = item["question"]
-            context = item["content"]
-            
-            # 定义要执行的任务
-            tasks = [self._generate_answer(question, context)]
-            
-            # 注意: 思维链现在由 _generate_answer 根据 enable_cot 自动处理
-            # 不再需要单独调用 _generate_cot
-            
-            # 如果启用了标签生成，添加到任务中
-            if self.enable_label:
-                tasks.append(self._generate_labels(question))
-            
-            # 同时执行所有任务
-            results = await asyncio.gather(*tasks)
-            
-            data_point = dict(item)
-            
-            # 处理答案结果 (第一个任务)
-            if isinstance(results[0], dict):
-                if 'choices' in results[0]:
-                    message = results[0]['choices'][0]['message']
-                    data_point["answer"] = (message.get('content') or '').strip()
-                    if 'reasoning_content' in message and message['reasoning_content']:
-                        data_point["reasoning_content"] = message['reasoning_content'].strip()
-                elif 'content' in results[0]:
-                    data_point["answer"] = results[0]['content']
-                    if 'reasoning_content' in results[0]:
-                        data_point["reasoning_content"] = results[0]['reasoning_content']
+            try:
+                question = item["question"]
+                context = item["content"]
+
+                tasks = [self._generate_answer(question, context)]
+
+                if self.enable_label:
+                    tasks.append(self._generate_labels(question))
+
+                results = await asyncio.gather(*tasks)
+
+                data_point = dict(item)
+
+                if isinstance(results[0], dict):
+                    if 'choices' in results[0]:
+                        message = results[0]['choices'][0]['message']
+                        data_point["answer"] = (message.get('content') or '').strip()
+                        if 'reasoning_content' in message and message['reasoning_content']:
+                            data_point["reasoning_content"] = message['reasoning_content'].strip()
+                    elif 'content' in results[0]:
+                        data_point["answer"] = results[0]['content']
+                        if 'reasoning_content' in results[0]:
+                            data_point["reasoning_content"] = results[0]['reasoning_content']
+                    else:
+                        data_point["answer"] = str(results[0])
                 else:
-                    data_point["answer"] = str(results[0])
-            else:
-                data_point["answer"] = results[0]
-            
-            # 处理其他任务结果
-            task_index = 1
-            
-            if self.enable_label:
-                data_point["labels"] = results[task_index]
-                task_index += 1
-            
-            if self.enable_optimize:
-                optimize_tasks = []
-                
-                if "answer" in data_point:
-                    optimize_tasks.append(self._optimize_answer(data_point["answer"]))
-                
-                if self.enable_cot and "reasoning_content" in data_point:
-                    optimize_tasks.append(self._optimize_cot(data_point["reasoning_content"]))
-                
-                if optimize_tasks:
-                    optimize_results = await asyncio.gather(*optimize_tasks)
-                    
-                    result_index = 0
+                    data_point["answer"] = results[0]
+
+                task_index = 1
+
+                if self.enable_label:
+                    data_point["labels"] = results[task_index]
+                    task_index += 1
+
+                if self.enable_optimize:
+                    optimize_tasks = []
+
                     if "answer" in data_point:
-                        data_point["answer"] = optimize_results[result_index]
-                        result_index += 1
-                    
+                        optimize_tasks.append(self._optimize_answer(data_point["answer"]))
+
                     if self.enable_cot and "reasoning_content" in data_point:
-                        data_point["reasoning_content"] = optimize_results[result_index]
-            
-            return data_point
+                        optimize_tasks.append(self._optimize_cot(data_point["reasoning_content"]))
+
+                    if optimize_tasks:
+                        optimize_results = await asyncio.gather(*optimize_tasks)
+
+                        result_index = 0
+                        if "answer" in data_point:
+                            data_point["answer"] = optimize_results[result_index]
+                            result_index += 1
+
+                        if self.enable_cot and "reasoning_content" in data_point:
+                            data_point["reasoning_content"] = optimize_results[result_index]
+
+                return {
+                    "success": True,
+                    "chunk_key": self._get_chunk_key(item),
+                    "data": data_point,
+                }
+            except Exception as exc:
+                detail = self._build_failure_detail(
+                    item,
+                    stage="answer_generation",
+                    exc=exc,
+                    question=item.get("question"),
+                )
+                logger.warning(
+                    f"问题生成答案失败，已跳过: file={detail['file']}, chunk_id={detail['chunk_id']}, question={detail.get('question', '')[:50]}, error={detail['error_message']}"
+                )
+                return {
+                    "success": False,
+                    "chunk_key": self._get_chunk_key(item),
+                    "failure": detail,
+                }
         
         # 动态计算最佳批处理大小
         max_concurrency = getattr(self, 'max_concurrency', 10)
@@ -180,6 +240,7 @@ class DatasetBuilder:
         logger.info(f"使用批处理大小: {batch_size}, 总并发数: {max_concurrency}")
         dataset: List[Dict[str, Any]] = []
         generated_count = 0
+        successful_chunk_keys = set()
         
         # 计算总批次数
         total_batches = (total_questions + batch_size - 1) // batch_size
@@ -191,22 +252,117 @@ class DatasetBuilder:
             batch_desc = f"生成答案 [批次 {i//batch_size+1}/{total_batches}]"
             batch_results = await tqdm_async.gather(*batch_tasks, desc=batch_desc)
 
-            if on_batch_complete and batch_results:
-                on_batch_complete(batch_results)
+            successful_batch_results = []
+            for result in batch_results:
+                if result.get("success"):
+                    successful_batch_results.append(result["data"])
+                    successful_chunk_keys.add(result["chunk_key"])
+                else:
+                    failed_parts.append(result["failure"])
+
+            if on_batch_complete and successful_batch_results:
+                on_batch_complete(successful_batch_results)
 
             if keep_in_memory:
-                dataset.extend(batch_results)
-            generated_count += len(batch_results)
+                dataset.extend(successful_batch_results)
+            generated_count += len(successful_batch_results)
             
             if batch_results:
-                logger.info(f"批次 {i//batch_size+1}/{total_batches} 完成: 成功 {len(batch_results)}/{len(batch_results)}")
+                logger.info(
+                    f"批次 {i//batch_size+1}/{total_batches} 完成: 成功 {len(successful_batch_results)}/{len(batch_results)}"
+                )
             
             # 短暂休息，避免API限制
             if i + batch_size < total_questions:
                 await asyncio.sleep(0.5)
         
+        document_failures = self._collect_document_failures(chunks, successful_chunk_keys)
+        self.last_failed_parts = failed_parts
+        self.last_document_failures = document_failures
+
+        if failed_parts:
+            logger.warning(self._format_partial_failure_message(failed_parts))
+
         logger.info(f"数据集构建完成，共 {generated_count} 个数据点")
+        if document_failures:
+            message = self._format_document_failure_message(document_failures, failed_parts)
+            logger.error(message)
+            raise DatasetBuildFailure(
+                message,
+                document_failures=document_failures,
+                failed_parts=failed_parts,
+                partial_dataset=list(dataset),
+            )
         return dataset
+
+    def _get_chunk_key(self, chunk: Dict[str, Any]) -> str:
+        return str(chunk.get("chunk_id") or chunk.get("id") or chunk.get("file") or "")
+
+    def _build_failure_detail(
+        self,
+        chunk: Dict[str, Any],
+        *,
+        stage: str,
+        exc: Exception,
+        question: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        detail = {
+            "file": chunk.get("file", ""),
+            "chunk_id": chunk.get("chunk_id", ""),
+            "summary": chunk.get("summary", ""),
+            "stage": stage,
+            "error_type": exc.__class__.__name__,
+            "error_message": str(exc),
+        }
+        if question:
+            detail["question"] = question
+        return detail
+
+    def _collect_document_failures(
+        self,
+        chunks: List[Dict[str, Any]],
+        successful_chunk_keys: set,
+    ) -> List[Dict[str, Any]]:
+        chunk_keys_by_file: Dict[str, List[str]] = defaultdict(list)
+        for chunk in chunks:
+            chunk_keys_by_file[chunk.get("file", "")].append(self._get_chunk_key(chunk))
+
+        document_failures: List[Dict[str, Any]] = []
+        for file_name, chunk_keys in chunk_keys_by_file.items():
+            if any(chunk_key in successful_chunk_keys for chunk_key in chunk_keys):
+                continue
+
+            document_failures.append(
+                {
+                    "file": file_name,
+                    "failed_chunk_ids": chunk_keys,
+                }
+            )
+        return document_failures
+
+    def _format_partial_failure_message(self, failed_parts: List[Dict[str, Any]]) -> str:
+        details = []
+        for item in failed_parts:
+            location = f"file={item.get('file', '')}, chunk_id={item.get('chunk_id', '')}, stage={item.get('stage', '')}"
+            if item.get("question"):
+                location += f", question={item['question'][:60]}"
+            details.append(f"{location}, error={item.get('error_message', '')}")
+        return "部分内容生成失败，已跳过失败部分: " + " | ".join(details)
+
+    def _format_document_failure_message(
+        self,
+        document_failures: List[Dict[str, Any]],
+        failed_parts: List[Dict[str, Any]],
+    ) -> str:
+        failed_docs_text = " ; ".join(
+            f"file={item.get('file', '')}, failed_chunks={','.join(item.get('failed_chunk_ids', []))}"
+            for item in document_failures
+        )
+        partial_text = self._format_partial_failure_message(failed_parts) if failed_parts else ""
+        message = f"以下文档全部内容生成失败: {failed_docs_text}"
+        if partial_text:
+            message = f"{message}。{partial_text}"
+        return message
     
     def save_dataset(self, dataset: List[Dict[str, Any]], output_path: str):
         """

@@ -1,8 +1,9 @@
+import asyncio
 import json
 
 import pytest
 
-from app.core.dataset import DatasetBuilder
+from app.core.dataset import DatasetBuilder, DatasetBuildFailure
 from fastdatasets.cli import run_generate
 
 
@@ -213,5 +214,175 @@ def test_cli_interrupt_callbacks_partial_results(monkeypatch, tmp_path):
             "instruction": "中断前问题",
             "input": "",
             "output": "中断前答案",
+        }
+    ]
+
+
+def test_build_dataset_skips_partial_chunk_failures_and_records_details(monkeypatch):
+    builder = DatasetBuilder()
+    builder.enable_optimize = False
+
+    async def fake_generate_questions(self, context, number=5):
+        if context == "bad chunk":
+            raise RuntimeError("question generation failed")
+        return [f"{context}-q1"]
+
+    async def fake_generate_answer(self, question, context):
+        return f"{question}-answer"
+
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_questions", fake_generate_questions)
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_answer", fake_generate_answer)
+
+    chunks = [
+        {"file": "doc-a.txt", "chunk_id": "doc-a_part_1", "content": "good chunk", "summary": "good"},
+        {"file": "doc-a.txt", "chunk_id": "doc-a_part_2", "content": "bad chunk", "summary": "bad"},
+    ]
+
+    dataset = asyncio.run(builder.build_dataset(chunks))
+
+    assert len(dataset) == 1
+    assert dataset[0]["chunk_id"] == "doc-a_part_1"
+    assert builder.last_document_failures == []
+    assert builder.last_failed_parts == [
+        {
+            "file": "doc-a.txt",
+            "chunk_id": "doc-a_part_2",
+            "summary": "bad",
+            "stage": "question_generation",
+            "error_type": "RuntimeError",
+            "error_message": "question generation failed",
+        }
+    ]
+
+
+def test_build_dataset_raises_when_entire_document_fails(monkeypatch):
+    builder = DatasetBuilder()
+    builder.enable_optimize = False
+
+    async def fake_generate_questions(self, context, number=5):
+        if context.startswith("bad"):
+            raise RuntimeError(f"{context} failed")
+        return [f"{context}-q1"]
+
+    async def fake_generate_answer(self, question, context):
+        return f"{question}-answer"
+
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_questions", fake_generate_questions)
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_answer", fake_generate_answer)
+
+    chunks = [
+        {"file": "good.txt", "chunk_id": "good_part_1", "content": "good", "summary": "good"},
+        {"file": "bad.txt", "chunk_id": "bad_part_1", "content": "bad-1", "summary": "bad1"},
+        {"file": "bad.txt", "chunk_id": "bad_part_2", "content": "bad-2", "summary": "bad2"},
+    ]
+
+    with pytest.raises(DatasetBuildFailure) as exc_info:
+        asyncio.run(builder.build_dataset(chunks))
+
+    exc = exc_info.value
+    assert exc.partial_dataset == [
+        {
+            "chunk_id": "good_part_1",
+            "file": "good.txt",
+            "summary": "good",
+            "content": "good",
+            "question": "good-q1",
+            "answer": "good-q1-answer",
+        }
+    ]
+    assert exc.document_failures == [
+        {
+            "file": "bad.txt",
+            "failed_chunk_ids": ["bad_part_1", "bad_part_2"],
+        }
+    ]
+    assert "bad.txt" in str(exc)
+    assert "bad_part_1" in str(exc)
+
+
+def test_cli_dataset_failure_callbacks_partial_results(monkeypatch, tmp_path):
+    callback_calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        callback_calls.append(
+            {
+                "url": url,
+                "json": json,
+                "timeout": timeout,
+            }
+        )
+
+        class FakeResponse:
+            status_code = 200
+            text = "ok"
+
+            def raise_for_status(self):
+                return None
+
+        return FakeResponse()
+
+    async def fake_build_dataset(self, chunks, on_batch_complete=None, keep_in_memory=True):
+        if on_batch_complete:
+            on_batch_complete(
+                [
+                    {
+                        "question": "成功问题",
+                        "answer": "成功答案",
+                    }
+                ]
+            )
+        raise DatasetBuildFailure(
+            "bad.txt 全部失败",
+            document_failures=[{"file": "bad.txt", "failed_chunk_ids": ["bad_part_1"]}],
+            failed_parts=[
+                {
+                    "file": "bad.txt",
+                    "chunk_id": "bad_part_1",
+                    "summary": "bad",
+                    "stage": "question_generation",
+                    "error_type": "RuntimeError",
+                    "error_message": "bad chunk failed",
+                }
+            ],
+            partial_dataset=[],
+        )
+
+    monkeypatch.setenv("CALLBACK_URL", "http://callback.test/front/callback/dataResultPath")
+    monkeypatch.setenv("TASK_ID", "doc-failed-001")
+    monkeypatch.setenv("FASTDATASETS_LOG_FILE", str(tmp_path / "fastdatasets.log"))
+    monkeypatch.setattr("app.core.dataset.httpx.post", fake_post)
+    monkeypatch.setattr("fastdatasets.cli.DocumentProcessor.process_document", lambda self, path: [{"content": "x"}])
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder.build_dataset", fake_build_dataset)
+
+    input_file = tmp_path / "doc.txt"
+    input_file.write_text("hello", encoding="utf-8")
+
+    with pytest.raises(DatasetBuildFailure):
+        run_generate(
+            [str(input_file)],
+            str(tmp_path / "job-doc-failed"),
+            formats=["alpaca"],
+            file_format="jsonl",
+            name="job-doc-failed",
+        )
+
+    expected_path = str(tmp_path / "job-doc-failed-alpaca.jsonl")
+    assert callback_calls == [
+        {
+            "url": "http://callback.test/front/callback/dataResultPath",
+            "json": [
+                {"id": "doc-failed-001", "resultPath": expected_path},
+            ],
+            "timeout": 30.0,
+        }
+    ]
+
+    with open(expected_path, "r", encoding="utf-8") as file_obj:
+        lines = [json.loads(line) for line in file_obj if line.strip()]
+    assert lines == [
+        {
+            "instruction": "成功问题",
+            "input": "",
+            "output": "成功答案",
         }
     ]
