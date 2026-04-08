@@ -249,6 +249,7 @@ def test_build_dataset_skips_partial_chunk_failures_and_records_details(monkeypa
             "file": "doc-a.txt",
             "chunk_id": "doc-a_part_2",
             "summary": "bad",
+            "content_preview": "bad chunk",
             "stage": "question_generation",
             "error_type": "RuntimeError",
             "error_message": "question generation failed",
@@ -326,6 +327,7 @@ def test_build_dataset_raises_when_no_questions_generated_for_any_chunk(monkeypa
         }
     ]
     assert len(exc.failed_parts) == 2
+    assert exc.failed_parts[0]["content_preview"]
 
 
 def test_build_dataset_skips_chunk_when_llm_request_error_exhausted(monkeypatch):
@@ -357,11 +359,37 @@ def test_build_dataset_skips_chunk_when_llm_request_error_exhausted(monkeypatch)
             "file": "mix.txt",
             "chunk_id": "mix_part_2",
             "summary": "fatal",
+            "content_preview": "fatal",
             "stage": "question_generation",
             "error_type": "LLMRequestError",
             "error_message": "llm exhausted retries",
         }
     ]
+
+
+def test_failure_message_includes_content_preview(monkeypatch):
+    builder = DatasetBuilder()
+    builder.enable_optimize = False
+
+    bad_content = "开头敏感内容" + ("中间内容" * 40) + "结尾敏感内容"
+
+    async def fake_generate_questions(self, context, number=5):
+        raise RuntimeError("question generation failed")
+
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_questions", fake_generate_questions)
+
+    chunks = [
+        {"file": "preview.txt", "chunk_id": "preview_part_1", "content": bad_content, "summary": "preview"},
+    ]
+
+    with pytest.raises(DatasetBuildFailure) as exc_info:
+        asyncio.run(builder.build_dataset(chunks))
+
+    message = str(exc_info.value)
+    assert "content_preview=" in message
+    assert "开头敏感内容" in message
+    assert "结尾敏感内容" in message
+    assert " ... " in message
 
 
 def test_cli_dataset_failure_callbacks_partial_results(monkeypatch, tmp_path):

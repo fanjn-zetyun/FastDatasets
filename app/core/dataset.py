@@ -121,7 +121,7 @@ class DatasetBuilder:
                     exc=exc,
                 )
                 logger.warning(
-                    f"文档块生成问题失败，已跳过: file={detail['file']}, chunk_id={detail['chunk_id']}, error={detail['error_message']}"
+                    f"文档块生成问题失败，已跳过: file={detail['file']}, chunk_id={detail['chunk_id']}, content_preview={detail.get('content_preview', '')}, error={detail['error_message']}"
                 )
                 return {
                     "success": False,
@@ -234,7 +234,7 @@ class DatasetBuilder:
                     question=item.get("question"),
                 )
                 logger.warning(
-                    f"问题生成答案失败，已跳过: file={detail['file']}, chunk_id={detail['chunk_id']}, question={detail.get('question', '')[:50]}, error={detail['error_message']}"
+                    f"问题生成答案失败，已跳过: file={detail['file']}, chunk_id={detail['chunk_id']}, question={detail.get('question', '')[:50]}, content_preview={detail.get('content_preview', '')}, error={detail['error_message']}"
                 )
                 return {
                     "success": False,
@@ -330,6 +330,7 @@ class DatasetBuilder:
             "file": chunk.get("file", ""),
             "chunk_id": chunk.get("chunk_id", ""),
             "summary": chunk.get("summary", ""),
+            "content_preview": self._build_content_preview(chunk.get("content", "")),
             "stage": stage,
             "error_type": exc.__class__.__name__,
             "error_message": str(exc),
@@ -337,6 +338,14 @@ class DatasetBuilder:
         if question:
             detail["question"] = question
         return detail
+
+    def _build_content_preview(self, content: str, edge_length: int = 80) -> str:
+        text = (content or "").replace("\n", " ").strip()
+        if not text:
+            return ""
+        if len(text) <= edge_length * 2 + 10:
+            return text
+        return f"{text[:edge_length]} ... {text[-edge_length:]}"
 
     def _collect_document_failures(
         self,
@@ -366,6 +375,8 @@ class DatasetBuilder:
             location = f"file={item.get('file', '')}, chunk_id={item.get('chunk_id', '')}, stage={item.get('stage', '')}"
             if item.get("question"):
                 location += f", question={item['question'][:60]}"
+            if item.get("content_preview"):
+                location += f", content_preview={item['content_preview']}"
             details.append(f"{location}, error={item.get('error_message', '')}")
         return "部分内容生成失败，已跳过失败部分: " + " | ".join(details)
 
