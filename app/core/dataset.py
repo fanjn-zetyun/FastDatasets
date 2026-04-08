@@ -144,6 +144,26 @@ class DatasetBuilder:
                 failed_parts.append(result["failure"])
         
         logger.info(f"已生成 {len(all_questions)} 个问题，开始生成答案...")
+
+        if not all_questions:
+            document_failures = self._collect_document_failures(chunks, set())
+            self.last_failed_parts = failed_parts
+            self.last_document_failures = document_failures
+
+            if failed_parts:
+                logger.warning(self._format_partial_failure_message(failed_parts))
+
+            logger.info("数据集构建完成，共 0 个数据点")
+            if document_failures:
+                message = self._format_document_failure_message(document_failures, failed_parts)
+                logger.error(message)
+                raise DatasetBuildFailure(
+                    message,
+                    document_failures=document_failures,
+                    failed_parts=failed_parts,
+                    partial_dataset=[],
+                )
+            return []
         
         # 步骤 2: 并行为每个问题生成答案和相关内容
         async def process_question(item):

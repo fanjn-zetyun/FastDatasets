@@ -21,6 +21,8 @@ class AsyncLLM:
         "your-api-key",
         "your-model-name",
     }
+    DEFAULT_RETRIES = 3
+    DEFAULT_RETRY_INTERVAL_SECONDS = 60
 
     def __init__(self, model_name=None, base_url=None, api_key=None, language=None, max_concurrency=None, system_prompt=None):
         self.model_name = model_name or config.MODEL_NAME
@@ -107,11 +109,15 @@ class AsyncLLM:
             return content
         return str(response)
     
-    async def call_llm_advanced(self, prompt, max_tokens=2048*2, retries=8, backoff_factor=1.8, 
+    async def call_llm_advanced(self, prompt, max_tokens=2048*2, retries=None, backoff_factor=1.8, 
                                  dynamic_timeout=True, return_exceptions=False):
         """高级LLM调用接口，支持错误处理、重试机制、动态超时等功能"""
         # 异步信号量控制
         async with self.semaphore:
+            retries = self.DEFAULT_RETRIES if retries is None else int(retries)
+            retry_interval = self.DEFAULT_RETRY_INTERVAL_SECONDS
+            total_attempts = max(1, retries)
+
             # 重新从环境变量获取配置，确保使用最新设置
             api_key, base_url, model_name = self._resolve_runtime_llm_settings()
             
@@ -147,7 +153,7 @@ class AsyncLLM:
             request_id = f"req-{random.randint(1000, 9999)}"
             last_error = None
             
-            for attempt in range(retries):
+            for attempt in range(total_attempts):
                 try:
                     # 随机化超时时间，避免所有请求同时超时
                     jitter = 1.0 + random.uniform(-0.15, 0.15)  # 随机因子±15%
@@ -155,7 +161,7 @@ class AsyncLLM:
                     if attempt > 0:
                         current_timeout *= (1 + attempt * 0.6)  # 每次重试增加60%超时时间
                     
-                    logger.debug(f"[{request_id}] API调用超时设置: {current_timeout:.1f}秒 (尝试 {attempt+1}/{retries})")
+                    logger.debug(f"[{request_id}] API调用超时设置: {current_timeout:.1f}秒 (尝试 {attempt+1}/{total_attempts})")
                     
                     # 准备请求数据
                     data = {
@@ -178,7 +184,7 @@ class AsyncLLM:
                     
                     # 日志记录开始信息 - 避免记录完整提示内容，只记录前30个字符
                     prompt_preview = prompt[:30].replace('\n', ' ') + "..." if len(prompt) > 30 else prompt
-                    logger.debug(f"[{request_id}] 发送请求到 {self.model_name} (尝试 {attempt+1}/{retries})")
+                    logger.debug(f"[{request_id}] 发送请求到 {self.model_name} (尝试 {attempt+1}/{total_attempts})")
                     logger.debug(f"[{request_id}] 提示预览: {prompt_preview}")
                     
                     start_time = time.time()
@@ -225,15 +231,14 @@ class AsyncLLM:
                                 
                             elif status_code == 429:
                                 logger.warning(f"[{request_id}] 请求频率限制，将重试")
-                                # 对于频率限制错误，使用更长的等待时间
-                                wait_time = backoff_factor * (2.5 ** attempt)
+                                wait_time = retry_interval
                                 logger.warning(f"[{request_id}] 等待 {wait_time:.1f} 秒后重试...")
                                 await asyncio.sleep(wait_time)
                                 continue
                                 
                             elif status_code >= 500:
                                 logger.warning(f"[{request_id}] 服务器错误 ({status_code})，将重试")
-                                wait_time = backoff_factor * (2 ** attempt)
+                                wait_time = retry_interval
                                 logger.warning(f"[{request_id}] 等待 {wait_time:.1f} 秒后重试...")
                                 await asyncio.sleep(wait_time)
                                 continue
@@ -254,8 +259,8 @@ class AsyncLLM:
                                 
                             # 其他HTTP错误
                             last_error = e
-                            if attempt < retries - 1:
-                                wait_time = backoff_factor * (2 ** attempt)
+                            if attempt < total_attempts - 1:
+                                wait_time = retry_interval
                                 logger.warning(f"[{request_id}] 等待 {wait_time:.1f} 秒后重试...")
                                 await asyncio.sleep(wait_time)
                             else:
@@ -276,8 +281,8 @@ class AsyncLLM:
                             return error
                         raise error
                     
-                    if attempt < retries - 1:
-                        wait_time = backoff_factor * (2 ** attempt)
+                    if attempt < total_attempts - 1:
+                        wait_time = retry_interval
                         logger.warning(f"[{request_id}] 将在 {wait_time:.1f} 秒后重试...")
                         await asyncio.sleep(wait_time)
                     else:
@@ -298,8 +303,8 @@ class AsyncLLM:
                     if isinstance(logging.getLogger().level, int) and logging.getLogger().level <= logging.DEBUG:
                         logger.debug(f"[{request_id}] 异常详情: {traceback.format_exc()}")
                     
-                    if attempt < retries - 1:
-                        wait_time = backoff_factor * (2 ** attempt)
+                    if attempt < total_attempts - 1:
+                        wait_time = retry_interval
                         logger.warning(f"[{request_id}] 将在 {wait_time:.1f} 秒后重试...")
                         await asyncio.sleep(wait_time)
                     else:
@@ -311,10 +316,10 @@ class AsyncLLM:
             # 所有重试都失败，抛出最终异常
             logger.error(f"[{request_id}] 所有 API 调用尝试都失败")
             if return_exceptions:
-                return LLMRequestError(f"所有API调用尝试都失败({retries}次)")
+                return LLMRequestError(f"所有API调用尝试都失败({total_attempts}次)")
             if isinstance(last_error, Exception):
-                raise LLMRequestError(f"所有API调用尝试都失败({retries}次): {str(last_error)}") from last_error
-            raise LLMRequestError(f"所有API调用尝试都失败({retries}次)")
+                raise LLMRequestError(f"所有API调用尝试都失败({total_attempts}次): {str(last_error)}") from last_error
+            raise LLMRequestError(f"所有API调用尝试都失败({total_attempts}次)")
     
     def _fallback_response(self, prompt: str) -> str:
         """当 LLM API 调用失败时的后备响应"""

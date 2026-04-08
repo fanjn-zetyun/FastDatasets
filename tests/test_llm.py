@@ -87,7 +87,50 @@ def test_remote_base_url_connect_error_retries(monkeypatch):
         asyncio.run(llm.call_llm_advanced("普通提示", retries=3))
 
     assert call_count == 3
-    assert sleep_calls == [1.8, 3.6]
+    assert sleep_calls == [60, 60]
+
+
+def test_remote_base_url_uses_default_total_three_attempts(monkeypatch):
+    llm = AsyncLLM(
+        model_name="test-model",
+        base_url="https://api.example.com/v1",
+        api_key="test-key",
+        max_concurrency=1,
+    )
+
+    call_count = 0
+    sleep_calls = []
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise httpx.ConnectError("All connection attempts failed")
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    monkeypatch.delenv("FASTDATASETS_PARAMS", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setattr(httpx, "AsyncClient", DummyAsyncClient)
+    monkeypatch.setattr("app.core.llm.asyncio.sleep", fake_sleep)
+
+    with pytest.raises(LLMRequestError, match="连接失败，已达到最大重试次数"):
+        asyncio.run(llm.call_llm_advanced("普通提示"))
+
+    assert call_count == 3
+    assert sleep_calls == [60, 60]
 
 
 def test_fastdatasets_params_take_precedence_over_default_localhost(monkeypatch):

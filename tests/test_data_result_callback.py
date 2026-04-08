@@ -4,6 +4,7 @@ import json
 import pytest
 
 from app.core.dataset import DatasetBuilder, DatasetBuildFailure
+from app.core.llm import LLMRequestError
 from fastdatasets.cli import run_generate
 
 
@@ -298,6 +299,69 @@ def test_build_dataset_raises_when_entire_document_fails(monkeypatch):
     ]
     assert "bad.txt" in str(exc)
     assert "bad_part_1" in str(exc)
+
+
+def test_build_dataset_raises_when_no_questions_generated_for_any_chunk(monkeypatch):
+    builder = DatasetBuilder()
+    builder.enable_optimize = False
+
+    async def fake_generate_questions(self, context, number=5):
+        raise LLMRequestError(f"{context} llm exhausted retries")
+
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_questions", fake_generate_questions)
+
+    chunks = [
+        {"file": "all-bad.txt", "chunk_id": "all_bad_part_1", "content": "bad-1", "summary": "bad1"},
+        {"file": "all-bad.txt", "chunk_id": "all_bad_part_2", "content": "bad-2", "summary": "bad2"},
+    ]
+
+    with pytest.raises(DatasetBuildFailure) as exc_info:
+        asyncio.run(builder.build_dataset(chunks))
+
+    exc = exc_info.value
+    assert exc.document_failures == [
+        {
+            "file": "all-bad.txt",
+            "failed_chunk_ids": ["all_bad_part_1", "all_bad_part_2"],
+        }
+    ]
+    assert len(exc.failed_parts) == 2
+
+
+def test_build_dataset_skips_chunk_when_llm_request_error_exhausted(monkeypatch):
+    builder = DatasetBuilder()
+    builder.enable_optimize = False
+
+    async def fake_generate_questions(self, context, number=5):
+        if context == "fatal":
+            raise LLMRequestError("llm exhausted retries")
+        return [f"{context}-q1"]
+
+    async def fake_generate_answer(self, question, context):
+        return f"{question}-answer"
+
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_questions", fake_generate_questions)
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_answer", fake_generate_answer)
+
+    chunks = [
+        {"file": "mix.txt", "chunk_id": "mix_part_1", "content": "ok", "summary": "ok"},
+        {"file": "mix.txt", "chunk_id": "mix_part_2", "content": "fatal", "summary": "fatal"},
+    ]
+
+    dataset = asyncio.run(builder.build_dataset(chunks))
+    assert len(dataset) == 1
+    assert dataset[0]["chunk_id"] == "mix_part_1"
+    assert builder.last_document_failures == []
+    assert builder.last_failed_parts == [
+        {
+            "file": "mix.txt",
+            "chunk_id": "mix_part_2",
+            "summary": "fatal",
+            "stage": "question_generation",
+            "error_type": "LLMRequestError",
+            "error_message": "llm exhausted retries",
+        }
+    ]
 
 
 def test_cli_dataset_failure_callbacks_partial_results(monkeypatch, tmp_path):
