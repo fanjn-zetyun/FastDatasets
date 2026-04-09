@@ -239,3 +239,88 @@ def test_moderation_400_does_not_retry(monkeypatch):
         asyncio.run(llm.call_llm_advanced("普通提示", retries=8))
 
     assert call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("fastdatasets_params", "expected_request_source"),
+    [
+        (
+            {
+                "api_key": "fastdatasets-key",
+                "base_url": "https://api.example.com/v1",
+                "model_name": "fd-model",
+                "model_source": "infer",
+            },
+            "ONLINE_WEB",
+        ),
+        (
+            {
+                "api_key": "fastdatasets-key",
+                "base_url": "https://cloud.baicaiinfer.com/v1",
+                "model_name": "fd-model",
+                "model_source": "other",
+            },
+            "ONLINE_WEB",
+        ),
+        (
+            {
+                "api_key": "fastdatasets-key",
+                "base_url": "https://api.example.com/v1",
+                "synthesizer_url": "https://cloud.test.baicaiinfer.com/v1",
+                "model_name": "fd-model",
+                "model_source": "other",
+            },
+            "ONLINE_WEB",
+        ),
+        (
+            {
+                "api_key": "fastdatasets-key",
+                "base_url": "https://api.example.com/v1",
+                "model_name": "fd-model",
+                "model_source": "other",
+            },
+            None,
+        ),
+    ],
+)
+def test_request_source_online_web_conditions(monkeypatch, fastdatasets_params, expected_request_source):
+    llm = AsyncLLM(
+        model_name="test-model",
+        base_url="https://fallback.example.com/v1",
+        api_key="test-key",
+        max_concurrency=1,
+    )
+
+    seen = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None, follow_redirects=True):
+            seen["request_source"] = json.get("request_source")
+            return DummyResponse()
+
+    monkeypatch.setenv("FASTDATASETS_PARAMS", json.dumps(fastdatasets_params))
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setattr(httpx, "AsyncClient", DummyAsyncClient)
+
+    response = asyncio.run(llm.call_llm_advanced("普通提示", retries=1))
+
+    assert seen["request_source"] == expected_request_source
+    assert response == {"choices": [{"message": {"content": "ok"}}]}

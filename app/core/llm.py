@@ -21,6 +21,10 @@ class AsyncLLM:
         "your-api-key",
         "your-model-name",
     }
+    _ONLINE_WEB_BASE_URLS = {
+        "https://cloud.baicaiinfer.com/v1",
+        "https://cloud.test.baicaiinfer.com/v1",
+    }
     DEFAULT_RETRIES = 3
     DEFAULT_RETRY_INTERVAL_SECONDS = 60
 
@@ -97,6 +101,29 @@ class AsyncLLM:
         parsed = urlparse(base_url)
         hostname = (parsed.hostname or "").lower()
         return hostname in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+    def _normalize_url(self, value):
+        value = self._clean_setting(value)
+        if not value:
+            return None
+        if not value.startswith(("http://", "https://")):
+            value = f"https://{value}"
+        return value.rstrip("/")
+
+    def _should_add_online_web_request_source(self, base_url=None) -> bool:
+        params = self._load_fastdatasets_params()
+        model_source = self._clean_setting(params.get("model_source"))
+        if model_source == "infer":
+            return True
+        if model_source != "other":
+            return False
+
+        candidate_urls = {
+            self._normalize_url(base_url),
+            self._normalize_url(params.get("base_url")),
+            self._normalize_url(params.get("synthesizer_url")),
+        }
+        return bool(candidate_urls & self._ONLINE_WEB_BASE_URLS)
     
     # 保持原有的简单接口，但内部使用高级实现
     async def call_llm(self, prompt, max_tokens=2048*2):
@@ -168,8 +195,9 @@ class AsyncLLM:
                         "model": self.model_name,
                         "messages": [{"role": "user", "content": prompt}],
                         "max_tokens": max_tokens,
-                        "request_source": "ONLINE_WEB"
                     }
+                    if self._should_add_online_web_request_source(base_url=self.base_url):
+                        data["request_source"] = "ONLINE_WEB"
                     
                     # 可选: 添加系统提示
                     if self.system_prompt:
