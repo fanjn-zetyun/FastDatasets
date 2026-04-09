@@ -367,6 +367,76 @@ def test_build_dataset_skips_chunk_when_llm_request_error_exhausted(monkeypatch)
     ]
 
 
+def test_build_dataset_skips_chunk_when_request_source_online_web_is_unsupported(monkeypatch):
+    builder = DatasetBuilder()
+    builder.enable_optimize = False
+
+    async def fake_generate_questions(self, context, number=5):
+        if context == "unsupported":
+            raise LLMRequestError(
+                "请求参数错误，当前请求来源不被目标服务支持 (code=1500): 未知的请求来源: 'ONLINE_WEB'"
+            )
+        return [f"{context}-q1"]
+
+    async def fake_generate_answer(self, question, context):
+        return f"{question}-answer"
+
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_questions", fake_generate_questions)
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_answer", fake_generate_answer)
+
+    chunks = [
+        {"file": "mix.txt", "chunk_id": "mix_part_1", "content": "ok", "summary": "ok"},
+        {"file": "mix.txt", "chunk_id": "mix_part_2", "content": "unsupported", "summary": "unsupported"},
+    ]
+
+    dataset = asyncio.run(builder.build_dataset(chunks))
+
+    assert len(dataset) == 1
+    assert dataset[0]["chunk_id"] == "mix_part_1"
+    assert builder.last_document_failures == []
+    assert builder.last_failed_parts == [
+        {
+            "file": "mix.txt",
+            "chunk_id": "mix_part_2",
+            "summary": "unsupported",
+            "content_preview": "unsupported",
+            "stage": "question_generation",
+            "error_type": "LLMRequestError",
+            "error_message": "请求参数错误，当前请求来源不被目标服务支持 (code=1500): 未知的请求来源: 'ONLINE_WEB'",
+        }
+    ]
+
+
+def test_build_dataset_fails_task_when_all_chunks_hit_unsupported_online_web_request_source(monkeypatch):
+    builder = DatasetBuilder()
+    builder.enable_optimize = False
+
+    async def fake_generate_questions(self, context, number=5):
+        raise LLMRequestError(
+            "请求参数错误，当前请求来源不被目标服务支持 (code=1500): 未知的请求来源: 'ONLINE_WEB'"
+        )
+
+    monkeypatch.setattr("app.core.dataset.DatasetBuilder._generate_questions", fake_generate_questions)
+
+    chunks = [
+        {"file": "all-bad.txt", "chunk_id": "all_bad_part_1", "content": "bad-1", "summary": "bad1"},
+        {"file": "all-bad.txt", "chunk_id": "all_bad_part_2", "content": "bad-2", "summary": "bad2"},
+    ]
+
+    with pytest.raises(DatasetBuildFailure) as exc_info:
+        asyncio.run(builder.build_dataset(chunks))
+
+    exc = exc_info.value
+    assert exc.document_failures == [
+        {
+            "file": "all-bad.txt",
+            "failed_chunk_ids": ["all_bad_part_1", "all_bad_part_2"],
+        }
+    ]
+    assert len(exc.failed_parts) == 2
+    assert all("当前请求来源不被目标服务支持" in item["error_message"] for item in exc.failed_parts)
+
+
 def test_failure_message_includes_content_preview(monkeypatch):
     builder = DatasetBuilder()
     builder.enable_optimize = False

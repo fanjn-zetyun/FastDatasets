@@ -16,6 +16,7 @@ from app.core.logger import logger
 class LLMRequestError(RuntimeError):
     """Raised when an LLM request fails and the task should stop immediately."""
 
+
 class AsyncLLM:
     _PLACEHOLDER_VALUES = {
         "your-api-key",
@@ -61,6 +62,28 @@ class AsyncLLM:
             return int(code) if code is not None else None
         except (TypeError, ValueError):
             return None
+
+    def _extract_payload_error_code(self, payload) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        code = payload.get("code")
+        try:
+            return int(code) if code is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _build_response_payload_error(self, payload) -> LLMRequestError | None:
+        error_code = self._extract_payload_error_code(payload)
+        if error_code != 1500 or not isinstance(payload, dict):
+            return None
+
+        error_message = str(payload.get("message") or "")
+        if "RequestSource" not in error_message and "未知的请求来源" not in error_message:
+            return None
+
+        return LLMRequestError(
+            f"请求参数错误，当前请求来源不被目标服务支持 (code=1500): {error_message}"
+        )
 
     def _load_fastdatasets_params(self):
         raw = os.getenv("FASTDATASETS_PARAMS")
@@ -235,6 +258,12 @@ class AsyncLLM:
                             # 解析响应
                             response_json = resp.json()
                             # print(f"完整响应: {response_json}")
+                            payload_error = self._build_response_payload_error(response_json)
+                            if payload_error:
+                                logger.error(f"[{request_id}] {payload_error}")
+                                if return_exceptions:
+                                    return payload_error
+                                raise payload_error
                             
                             # 处理响应格式，返回完整的响应JSON，方便处理推理内容
                             logger.debug(f"[{request_id}] 请求成功，耗时 {elapsed:.2f}秒")

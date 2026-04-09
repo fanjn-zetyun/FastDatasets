@@ -241,6 +241,54 @@ def test_moderation_400_does_not_retry(monkeypatch):
     assert call_count == 1
 
 
+def test_request_source_payload_error_1500_raises_without_retry(monkeypatch):
+    llm = AsyncLLM(
+        model_name="test-model",
+        base_url="https://api.example.com/v1",
+        api_key="test-key",
+        max_concurrency=1,
+    )
+
+    call_count = 0
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "code": 1500,
+                "message": "参数类型错误: JSON parse error: Cannot construct instance of `com.zetyun.infer.scheduler.dto.request.RequestSource`, problem: 未知的请求来源: 'ONLINE_WEB'. 可选值: API, BAICAI_WEB",
+                "data": None,
+            }
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return DummyResponse()
+
+    monkeypatch.delenv("FASTDATASETS_PARAMS", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_BASE", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setattr(httpx, "AsyncClient", DummyAsyncClient)
+
+    with pytest.raises(LLMRequestError, match="当前请求来源不被目标服务支持"):
+        asyncio.run(llm.call_llm_advanced("普通提示", retries=3))
+
+    assert call_count == 1
+
+
 @pytest.mark.parametrize(
     ("fastdatasets_params", "expected_request_source"),
     [
