@@ -4,15 +4,28 @@ from loguru import logger
 from dotenv import load_dotenv
 from app.core.config import config
 
+try:
+    from tqdm import tqdm
+except Exception:  # pragma: no cover - tqdm may be unavailable in minimal environments
+    tqdm = None
+
 # 加载环境变量
 load_dotenv()
 
 # 配置日志
 logger.remove()  # 移除默认的处理器
 
+
+def _console_sink(message):
+    text = str(message)
+    if tqdm is not None:
+        tqdm.write(text, file=sys.stderr, end="")
+        return
+    sys.stderr.write(text)
+
 # 添加控制台输出
 logger.add(
-    sys.stderr,
+    _console_sink,
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
     level=config.LOG_LEVEL
 )
