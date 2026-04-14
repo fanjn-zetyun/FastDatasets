@@ -5,6 +5,11 @@ from typing import List, Dict, Any
 from app.core.logger import logger
 from app.core.config import config
 
+
+class DocumentParseError(Exception):
+    """文档解析阶段的致命错误。"""
+
+
 class DocumentProcessor:
     """文档处理器，用于解析和处理文档内容"""
     
@@ -26,13 +31,15 @@ class DocumentProcessor:
         """
         file_path = Path(file_path)
         if not file_path.exists():
-            logger.error(f"文件不存在: {file_path}")
-            return ""
+            message = f"文件不存在: {file_path}"
+            logger.error(message)
+            raise DocumentParseError(message)
             
         suffix = file_path.suffix.lower()
         if suffix not in self.supported_formats:
-            logger.error(f"不支持的文件格式: {suffix}")
-            return ""
+            message = f"不支持的文件格式: {suffix}"
+            logger.error(message)
+            raise DocumentParseError(message)
             
         logger.info(f"解析文档: {file_path}")
         
@@ -43,11 +50,15 @@ class DocumentProcessor:
             # 使用内置方法解析文本文档 (.txt, .md)
             elif suffix in [".txt", ".md"]:
                 return self._parse_txt(file_path)
-            
-            return ""
+            message = f"文档解析结果为空: {file_path}"
+            logger.error(message)
+            raise DocumentParseError(message)
+        except DocumentParseError:
+            raise
         except Exception as e:
-            logger.error(f"解析文档失败 {file_path}: {str(e)}")
-            return ""
+            message = f"解析文档失败 {file_path}: {str(e)}"
+            logger.error(message)
+            raise DocumentParseError(message) from e
     
     def process_document(self, file_path: str, chunk_size: int = None, chunk_overlap: int = 200) -> List[Dict[str, Any]]:
         """
@@ -118,8 +129,9 @@ class DocumentProcessor:
             try:
                 import textract  # type: ignore
             except Exception:
-                logger.error("未安装可选依赖 textract-py3。请运行: pip install 'fastdatasets[doc]'")
-                return f"无法解析文档 {file_path.name}（缺少 textract），请安装可选依赖: pip install 'fastdatasets[doc]'"
+                message = "未安装可选依赖 textract-py3。请运行: pip install 'fastdatasets[doc]'"
+                logger.error(message)
+                raise DocumentParseError(message)
 
             logger.info(f"使用 textract 解析文件: {file_path}")
             text = textract.process(str(file_path)).decode('utf-8')
@@ -130,13 +142,15 @@ class DocumentProcessor:
                 text = textract.process(str(file_path)).decode('gbk')
                 return text
             except Exception as e:
-                logger.error(f"textract 解析文件失败 (GBK): {str(e)}")
-                # 如果解析失败，返回占位内容
-                return f"无法解析文档 {file_path.name}，这是一个占位内容。"
+                message = f"textract 解析文件失败 (GBK): {str(e)}"
+                logger.error(message)
+                raise DocumentParseError(message) from e
+        except DocumentParseError:
+            raise
         except Exception as e:
-            logger.error(f"textract 解析文件失败: {str(e)}")
-            # 如果解析失败，返回占位内容
-            return f"无法解析文档 {file_path.name}，这是一个占位内容。"
+            message = f"textract 解析文件失败: {str(e)}"
+            logger.error(message)
+            raise DocumentParseError(message) from e
     
     def _extract_outline(self, text: str) -> List[Dict[str, Any]]:
         """提取 Markdown 文本大纲（所有标题）"""

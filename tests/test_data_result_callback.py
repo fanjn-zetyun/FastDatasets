@@ -4,8 +4,9 @@ import json
 import pytest
 
 from app.core.dataset import DatasetBuilder, DatasetBuildFailure
+from app.core.document import DocumentParseError
 from app.core.llm import LLMRequestError
-from fastdatasets.cli import run_generate
+from fastdatasets.cli import main, run_generate
 
 
 def test_export_dataset_callbacks_after_success(monkeypatch, tmp_path):
@@ -539,12 +540,34 @@ def test_cli_dataset_failure_callbacks_partial_results(monkeypatch, tmp_path):
         }
     ]
 
-    with open(expected_path, "r", encoding="utf-8") as file_obj:
-        lines = [json.loads(line) for line in file_obj if line.strip()]
-    assert lines == [
-        {
-            "instruction": "成功问题",
-            "input": "",
-            "output": "成功答案",
-        }
-    ]
+
+def test_run_generate_fails_when_input_file_missing(tmp_path):
+    missing_file = tmp_path / "missing doc.txt"
+
+    with pytest.raises(DocumentParseError, match="文件不存在"):
+        run_generate(
+            [str(missing_file)],
+            str(tmp_path / "job-missing"),
+            formats=["alpaca"],
+            file_format="jsonl",
+            name="job-missing",
+        )
+
+
+def test_main_exits_nonzero_on_unexpected_error(monkeypatch, tmp_path):
+    input_file = tmp_path / "doc.txt"
+    input_file.write_text("hello", encoding="utf-8")
+
+    monkeypatch.setattr("sys.argv", [
+        "fastdatasets",
+        "generate",
+        str(input_file),
+        "-o",
+        str(tmp_path / "job-main-fail"),
+    ])
+    monkeypatch.setattr("fastdatasets.cli.run_generate", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 1

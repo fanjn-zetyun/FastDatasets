@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import os
 import signal
+import sys
 from pathlib import Path
 from typing import List
 
@@ -13,6 +14,10 @@ from app.core.logger import logger
 
 class GenerationInterrupted(KeyboardInterrupt):
     """用于将 SIGTERM/SIGINT 转换为可收尾的中断异常。"""
+
+
+class GenerationFailed(RuntimeError):
+    """用于标记应导致 CLI 非零退出的生成失败。"""
 
 
 def _raise_interrupt(signum, _frame):
@@ -62,6 +67,11 @@ def run_generate(input_paths: List[str], output_path: str, formats: List[str], f
         else:
             chunks = processor.process_document(str(path))
             all_chunks.extend(chunks)
+
+    if not all_chunks:
+        message = f"未能从输入中解析出任何文档块: {', '.join(input_paths)}"
+        logger.error(message)
+        raise GenerationFailed(message)
 
     stream_targets = builder.prepare_stream_exports(
         output_path,
@@ -127,13 +137,20 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "generate":
-        formats = [s.strip() for s in str(args.formats).split(",") if s.strip()]
-        run_generate(args.inputs, args.output, formats=formats, file_format=args.file_format,
-                     chunk_min_len=args.chunk_min_len, chunk_max_len=args.chunk_max_len,
-                     questions_per_chunk=args.questions_per_chunk, llm_concurrency=args.llm_concurrency,
-                     file_concurrency=args.file_concurrency, enable_cot=args.enable_cot, name=args.name)
+    try:
+        if args.command == "generate":
+            formats = [s.strip() for s in str(args.formats).split(",") if s.strip()]
+            run_generate(args.inputs, args.output, formats=formats, file_format=args.file_format,
+                         chunk_min_len=args.chunk_min_len, chunk_max_len=args.chunk_max_len,
+                         questions_per_chunk=args.questions_per_chunk, llm_concurrency=args.llm_concurrency,
+                         file_concurrency=args.file_concurrency, enable_cot=args.enable_cot, name=args.name)
+    except KeyboardInterrupt as exc:
+        logger.error(f"FastDatasets interrupted: {exc}")
+        raise SystemExit(130) from exc
+    except Exception as exc:
+        logger.exception(f"FastDatasets failed: {exc}")
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

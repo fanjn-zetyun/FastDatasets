@@ -5,6 +5,7 @@
 """
 import json
 import os
+import shlex
 import sys
 from datetime import datetime
 from typing import Any, List
@@ -138,6 +139,11 @@ def build_command(params):
 
     return cmd_parts
 
+
+def shell_join(parts: List[str]) -> str:
+    """将命令参数安全地拼接为可执行的 shell 命令字符串。"""
+    return " ".join(shlex.quote(part) for part in parts)
+
 def main():
     # 1. 读取参数
     params = load_params()
@@ -151,15 +157,15 @@ def main():
     cmd_script = "/tmp/fastdatasets_cmd.sh"
     with open(cmd_script, "w") as f:
         # 写入环境变量
-        f.write(f'export LLM_API_KEY="{params.get("api_key", "")}"\n')
-        f.write(f'export LLM_API_BASE="{params.get("base_url", "")}"\n')
-        f.write(f'export LLM_MODEL="{params.get("model_name", "")}"\n')
+        f.write(f"export LLM_API_KEY={shlex.quote(params.get('api_key', ''))}\n")
+        f.write(f"export LLM_API_BASE={shlex.quote(params.get('base_url', ''))}\n")
+        f.write(f"export LLM_MODEL={shlex.quote(params.get('model_name', ''))}\n")
         # 写入命令
-        f.write(" ".join(cmd_parts))
+        f.write(shell_join(cmd_parts) + "\n")
 
     log(f"Generated command script: {cmd_script}")
     log("Command:")
-    log(" ".join(cmd_parts))
+    log(shell_join(cmd_parts))
 
 if __name__ == "__main__":
     main()
